@@ -1,3 +1,6 @@
+Barbarian farmer twsdk · JS
+Copiar
+
 /*
     NAME: Barbarian Farmer
     DESCRIPTION: Ataca vilas bárbaras próximas automaticamente com LC + Explorador
@@ -2058,38 +2061,33 @@ async function runAttackRound() {
     // O widget de unidades da visão geral usa linhas com classe "home_unit"
     // e armazena a quantidade em <strong data-count="UNIDADE">NUMERO</strong>
     // Exemplo: <tr class="home_unit ..."><td>...<strong data-count="light">986</strong>...</td></tr>
-    function getHomeUnitCount(unit) {
-        // VillageOverview.units[1] = tropas em casa (índice fixo do jogo)
-        // O valor pode ser um objeto completo (unidade existe) ou string "0" (não existe)
-        // A quantidade em casa NÃO vem no objeto — vem no DOM da linha home_unit
+    // Busca tropas disponíveis em casa via fetch da tela de praça (?screen=place).
+    // A praça retorna inputs com id="unit_input_UNIT" contendo o total disponível,
+    // e atributo "data-all-count" com o máximo possível — usamos o value (disponível agora).
+    async function getHomeTroops() {
         try {
-            const homeUnits = VillageOverview.units[1];
-            if (homeUnits) {
-                const entry = homeUnits[unit];
-                // Se é string "0" ou null, a unidade não existe nessa vila
-                if (entry === '0' || entry === null || entry === undefined) return 0;
-                // Se é objeto, a unidade existe — buscar quantidade no DOM
-            }
-        } catch (e) { /* VillageOverview indisponível, segue para DOM */ }
+            const html = await jQuery.get(
+                `/game.php?village=${game_data.village.id}&screen=place`
+            );
+            const doc = new DOMParser().parseFromString(html, 'text/html');
 
-        // DOM: tenta home_unit primeiro (visão separada), depois all_unit (visão "Todos")
-        // Ambas têm <strong data-count="UNIT">NUMERO</strong>
-        // Nota: quando o widget está em modo "Todos", as linhas home_unit ficam ocultas
-        // mas ainda existem no DOM com os valores corretos de tropas em casa
-        const selectors = [
-            '.home_unit strong[data-count="' + unit + '"]',
-            '.all_unit strong[data-count="' + unit + '"]',
-        ];
-        for (const sel of selectors) {
-            const val = jQuery(sel).first().text().trim();
-            if (val !== '') return parseInt(val) || 0;
+            const get = (unit) => {
+                const el = doc.querySelector(`#unit_input_${unit}`);
+                if (el) return parseInt(el.value) || 0;
+                // fallback: input pelo name com atributo max
+                const byName = doc.querySelector(`input[name="${unit}"]`);
+                if (byName) return parseInt(byName.max) || 0;
+                return 0;
+            };
+
+            return { light: get('light'), spy: get('spy') };
+        } catch (e) {
+            log(`Erro ao buscar tropas: ${e.message}`, 'error');
+            return { light: 0, spy: 0 };
         }
-
-        return 0;
     }
 
-    const lightAvailable = getHomeUnitCount('light');
-    const spyAvailable = getHomeUnitCount('spy');
+    const { light: lightAvailable, spy: spyAvailable } = await getHomeTroops();
 
     log(`Tropas em casa — LC: ${lightAvailable} | Exp: ${spyAvailable}`);
 
