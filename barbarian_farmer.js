@@ -1928,6 +1928,32 @@ function sleep(ms) {
 }
 
 // ═══════════════════════════════════════════════════════
+//  VERIFICAÇÃO DE CAPTCHA 
+// ═══════════════════════════════════════════════════════
+function waitForCaptcha() {
+    return new Promise(resolve => {
+        // Verifica se já há captcha visível
+        if (jQuery('#bot_check_container, #captcha, .bot-check').length === 0) {
+            resolve();
+            return;
+        }
+
+        log('⚠ Verificação antibot detectada! Aguardando resolução...', 'warn');
+
+        // Observa o DOM até o captcha desaparecer
+        const observer = new MutationObserver(() => {
+            if (jQuery('#bot_check_container, #captcha, .bot-check').length === 0) {
+                observer.disconnect();
+                log('✓ Verificação concluída. Retomando ataques...', 'success');
+                resolve();
+            }
+        });
+
+        observer.observe(document.body, { childList: true, subtree: true });
+    });
+}
+
+// ═══════════════════════════════════════════════════════
 //  BUSCAR VILAS BÁRBARAS — usa twSDK.worldDataAPI()
 // ═══════════════════════════════════════════════════════
 async function fetchBarbarianVillages() {
@@ -2114,6 +2140,7 @@ async function runAttackRound() {
     let sent = 0;
     for (const village of barbarians) {
         if (!isRunning || sent >= attacksToSend) break;
+        await waitForCaptcha(); // ← aguarda se houver captcha
         const ok = await sendAttack(village);
         if (ok) sent++;
         // Delay entre requisições (twSDK.delayBetweenRequests = 200ms por padrão,
