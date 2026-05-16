@@ -1,6 +1,3 @@
-Barbarian farmer twsdk · JS
-Copiar
-
 /*
     NAME: Barbarian Farmer
     DESCRIPTION: Ataca vilas bárbaras próximas automaticamente com LC + Explorador
@@ -49,7 +46,7 @@ var scriptConfig = {
             'Running': 'Rodando...',
         },
     },
-    allowedMarkets: [],      // [] = todos os mercados; ou ex: ['br', 'en']
+    allowedMarkets: ['br'],      // [] = todos os mercados; ou ex: ['br', 'en']
     allowedScreens: [],      // [] = qualquer tela do jogo
     allowedModes: [],      // [] = qualquer modo
     isDebug: true,    // true = exibe logs no console do navegador
@@ -2061,33 +2058,29 @@ async function runAttackRound() {
     // O widget de unidades da visão geral usa linhas com classe "home_unit"
     // e armazena a quantidade em <strong data-count="UNIDADE">NUMERO</strong>
     // Exemplo: <tr class="home_unit ..."><td>...<strong data-count="light">986</strong>...</td></tr>
-    // Busca tropas disponíveis em casa via fetch da tela de praça (?screen=place).
-    // A praça retorna inputs com id="unit_input_UNIT" contendo o total disponível,
-    // e atributo "data-all-count" com o máximo possível — usamos o value (disponível agora).
-    async function getHomeTroops() {
+    function getHomeUnitCount(unit) {
+        // Primeiro tenta pelo widget de visão geral (tela overview)
+        const fromWidget = jQuery('.home_unit strong[data-count="' + unit + '"]').first().text().trim();
+        if (fromWidget !== '') return parseInt(fromWidget) || 0;
+
+        // Fallback: VillageOverview.units[1] é o objeto de tropas em casa (índice 1 = home)
+        // Disponível globalmente quando o widget está carregado
         try {
-            const html = await jQuery.get(
-                `/game.php?village=${game_data.village.id}&screen=place`
-            );
-            const doc = new DOMParser().parseFromString(html, 'text/html');
+            const homeUnits = VillageOverview.units[1];
+            if (homeUnits && homeUnits[unit] && typeof homeUnits[unit] === 'object') {
+                // quando é objeto completo, a quantidade não vem aqui;
+                // nesse caso usa o texto do DOM mesmo
+            }
+            if (homeUnits && typeof homeUnits[unit] === 'string') {
+                return parseInt(homeUnits[unit]) || 0;
+            }
+        } catch (e) { /* VillageOverview pode não estar disponível em todas as telas */ }
 
-            const get = (unit) => {
-                const el = doc.querySelector(`#unit_input_${unit}`);
-                if (el) return parseInt(el.value) || 0;
-                // fallback: input pelo name com atributo max
-                const byName = doc.querySelector(`input[name="${unit}"]`);
-                if (byName) return parseInt(byName.max) || 0;
-                return 0;
-            };
-
-            return { light: get('light'), spy: get('spy') };
-        } catch (e) {
-            log(`Erro ao buscar tropas: ${e.message}`, 'error');
-            return { light: 0, spy: 0 };
-        }
+        return 0;
     }
 
-    const { light: lightAvailable, spy: spyAvailable } = await getHomeTroops();
+    const lightAvailable = getHomeUnitCount('light');
+    const spyAvailable = getHomeUnitCount('spy');
 
     log(`Tropas em casa — LC: ${lightAvailable} | Exp: ${spyAvailable}`);
 
