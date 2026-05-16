@@ -1,21 +1,13 @@
 /*
-    NAME: Tribal Wars Scripts Library
-    VERSION: 1.2.3 (beta version)
-    LAST UPDATED AT: 2024-06-23
-    AUTHOR: RedAlert (redalert_tw)
-    AUTHOR URL: https://twscripts.dev/
-    CONTRIBUTORS: Shinko to Kuma; Sass, SaveBankDev, DSsecundum, suilenroc
-    HELP: https://github.com/RedAlertTW/Tribal-Wars-Scripts-SDK
-    STATUS: Work in progress. Not finished 100%.
+    NAME: Barbarian Farmer
+    DESCRIPTION: Ataca vilas bárbaras próximas automaticamente com LC + Explorador
+    VERSION: 1.0.0
+    AUTHOR: inaciopjsi
+*/
 
-    This software is provided 'as-is', without any express or implied warranty.
-    In no event will the author/s be held liable for any damages arising from the use of this software.
-    It is allowed to clone, rehost, re-distribute and all other forms of copying this code without permission from the author/s, for as long as it is not used on commercial products.
-    This notice may not be removed or altered from any source distribution.
- */
-
-scriptUrl = document.currentScript.src;
-
+// ═══════════════════════════════════════════════════════
+//  scriptConfig — configuração exigida pelo twSDK.init()
+// ═══════════════════════════════════════════════════════
 var scriptConfig = {
     scriptData: {
         name: 'Barbarian Farmer',
@@ -54,7 +46,7 @@ var scriptConfig = {
             'Running': 'Rodando...',
         },
     },
-    allowedMarkets: ['br'],      // [] = todos os mercados; ou ex: ['br', 'en']
+    allowedMarkets: [],      // [] = todos os mercados; ou ex: ['br', 'en']
     allowedScreens: [],      // [] = qualquer tela do jogo
     allowedModes: [],      // [] = qualquer modo
     isDebug: true,    // true = exibe logs no console do navegador
@@ -1899,7 +1891,6 @@ window.twSDK = {
     },
 };
 
-
 // ═══════════════════════════════════════════════════════
 //  PARÂMETROS DO FARMER — edite aqui
 // ═══════════════════════════════════════════════════════
@@ -1922,7 +1913,6 @@ let attackLog = [];
 let roundCount = 0;
 let totalAttacks = 0;
 
-
 // ═══════════════════════════════════════════════════════
 //  UTILITÁRIOS
 // ═══════════════════════════════════════════════════════
@@ -1937,7 +1927,6 @@ function log(msg, type = 'info') {
 function sleep(ms) {
     return new Promise(resolve => setTimeout(resolve, ms));
 }
-
 
 // ═══════════════════════════════════════════════════════
 //  BUSCAR VILAS BÁRBARAS — usa twSDK.worldDataAPI()
@@ -2065,19 +2054,35 @@ async function runAttackRound() {
     log(`══ Rodada #${roundCount} ══`);
     updateStatsUI();
 
-    // Verificar tropas disponíveis direto do DOM (estamos no contexto do jogo)
-    const lightAvailable = parseInt(
-        jQuery('#unit_light a').first().text() ||
-        jQuery('[data-unit="light"] .unit-count').first().text() ||
-        '0'
-    );
-    const spyAvailable = parseInt(
-        jQuery('#unit_spy a').first().text() ||
-        jQuery('[data-unit="spy"] .unit-count').first().text() ||
-        '0'
-    );
+    // Verificar tropas em casa direto do DOM.
+    // O widget de unidades da visão geral usa linhas com classe "home_unit"
+    // e armazena a quantidade em <strong data-count="UNIDADE">NUMERO</strong>
+    // Exemplo: <tr class="home_unit ..."><td>...<strong data-count="light">986</strong>...</td></tr>
+    function getHomeUnitCount(unit) {
+        // Primeiro tenta pelo widget de visão geral (tela overview)
+        const fromWidget = jQuery('.home_unit strong[data-count="' + unit + '"]').first().text().trim();
+        if (fromWidget !== '') return parseInt(fromWidget) || 0;
 
-    log(`Tropas — LC: ${lightAvailable} | Exp: ${spyAvailable}`);
+        // Fallback: VillageOverview.units[1] é o objeto de tropas em casa (índice 1 = home)
+        // Disponível globalmente quando o widget está carregado
+        try {
+            const homeUnits = VillageOverview.units[1];
+            if (homeUnits && homeUnits[unit] && typeof homeUnits[unit] === 'object') {
+                // quando é objeto completo, a quantidade não vem aqui;
+                // nesse caso usa o texto do DOM mesmo
+            }
+            if (homeUnits && typeof homeUnits[unit] === 'string') {
+                return parseInt(homeUnits[unit]) || 0;
+            }
+        } catch (e) { /* VillageOverview pode não estar disponível em todas as telas */ }
+
+        return 0;
+    }
+
+    const lightAvailable = getHomeUnitCount('light');
+    const spyAvailable = getHomeUnitCount('spy');
+
+    log(`Tropas em casa — LC: ${lightAvailable} | Exp: ${spyAvailable}`);
 
     const maxByTroops = Math.floor(
         Math.min(
