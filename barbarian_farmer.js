@@ -46,7 +46,7 @@ var scriptConfig = {
             'Running': 'Rodando...',
         },
     },
-    allowedMarkets: [],      // [] = todos os mercados; ou ex: ['br', 'en']
+    allowedMarkets: ['br'],      // [] = todos os mercados; ou ex: ['br', 'en']
     allowedScreens: [],      // [] = qualquer tela do jogo
     allowedModes: [],      // [] = qualquer modo
     isDebug: true,    // true = exibe logs no console do navegador
@@ -1899,7 +1899,6 @@ const FARMER_CONFIG = {
     spy: 1,    // Exploradores por ataque
     maxDistance: 20,   // raio máximo (em campos)
     intervalMinutes: 30,   // minutos entre rodadas
-    maxAttacksPerRound: 10,   // máximo de ataques por rodada
     minBarbarianPoints: 0,    // pontos mínimos da bárbara
     maxBarbarianPoints: 9999, // pontos máximos da bárbara
 };
@@ -2105,9 +2104,8 @@ async function runAttackRound() {
         return;
     }
 
-    const attacksToSend = Math.min(maxByTroops, FARMER_CONFIG.maxAttacksPerRound);
     const barbarians = await fetchBarbarianVillages();
-
+    const attacksToSend = Math.min(maxByTroops, barbarians.length);
     if (barbarians.length === 0) {
         log('Nenhuma bárbara encontrada no raio.', 'warn');
         return;
@@ -2214,10 +2212,6 @@ function buildUI() {
             <label>⏱ Intervalo (minutos)</label>
             <input type="number" id="bf-cfg-interval" min="5" max="480" value="${FARMER_CONFIG.intervalMinutes}">
         </div>
-        <div class="bf-field">
-            <label>🎯 Máx. ataques/rodada</label>
-            <input type="number" id="bf-cfg-max" min="1" max="50" value="${FARMER_CONFIG.maxAttacksPerRound}">
-        </div>
  
         <!-- Log -->
         <div class="bf-section-title ra-mt15">📋 Log</div>
@@ -2238,7 +2232,6 @@ function applyConfig() {
     FARMER_CONFIG.spy = parseInt(jQuery('#bf-cfg-spy').val()) || FARMER_CONFIG.spy;
     FARMER_CONFIG.maxDistance = parseInt(jQuery('#bf-cfg-dist').val()) || FARMER_CONFIG.maxDistance;
     FARMER_CONFIG.intervalMinutes = parseInt(jQuery('#bf-cfg-interval').val()) || FARMER_CONFIG.intervalMinutes;
-    FARMER_CONFIG.maxAttacksPerRound = parseInt(jQuery('#bf-cfg-max').val()) || FARMER_CONFIG.maxAttacksPerRound;
 }
 
 function updateStatsUI() {
