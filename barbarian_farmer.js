@@ -16,7 +16,50 @@
 
 scriptUrl = document.currentScript.src;
 
-var scriptConfig = {};
+var scriptConfig = {
+    scriptData: {
+        name: 'Barbarian Farmer',
+        version: 'v1.0.0',
+        author: 'inaciopjsi',
+        authorUrl: 'https://github.com/inaciopjsi',
+        helpLink: 'https://github.com/inaciopjsi/twtest',
+    },
+    translations: {
+        // twSDK.tt() usa o locale do jogo para buscar aqui
+        // Coloque todos os locales que quiser suportar
+        'en_DK': {
+            'Barbarian Farmer': 'Barbarian Farmer',
+            'Help': 'Help',
+            'Start': 'Start',
+            'Stop': 'Stop',
+            'Run Now': 'Run Now',
+            'Rounds': 'Rounds',
+            'Attacks': 'Attacks',
+            'Interval': 'Interval',
+            'Status': 'Status',
+            'Stopped': 'Stopped',
+            'Running': 'Running...',
+        },
+        'pt_BR': {
+            'Barbarian Farmer': 'Barbarian Farmer',
+            'Help': 'Ajuda',
+            'Start': '▶ Iniciar',
+            'Stop': '■ Parar',
+            'Run Now': '↺ Agora',
+            'Rounds': 'Rodadas',
+            'Attacks': 'Ataques',
+            'Interval': 'Intervalo',
+            'Status': 'Status',
+            'Stopped': 'Parado',
+            'Running': 'Rodando...',
+        },
+    },
+    allowedMarkets: ['br'],      // [] = todos os mercados; ou ex: ['br', 'en']
+    allowedScreens: [],      // [] = qualquer tela do jogo
+    allowedModes: [],      // [] = qualquer modo
+    isDebug: true,    // true = exibe logs no console do navegador
+    enableCountApi: false,   // false = não envia contagem para twscripts.dev
+};
 
 window.twSDK = {
     // variables
@@ -1856,13 +1899,378 @@ window.twSDK = {
     },
 };
 
+
+// ═══════════════════════════════════════════════════════
+//  PARÂMETROS DO FARMER — edite aqui
+// ═══════════════════════════════════════════════════════
+const FARMER_CONFIG = {
+    lightCavalry: 3,    // LC por ataque
+    spy: 1,    // Exploradores por ataque
+    maxDistance: 20,   // raio máximo (em campos)
+    intervalMinutes: 30,   // minutos entre rodadas
+    maxAttacksPerRound: 10,   // máximo de ataques por rodada
+    minBarbarianPoints: 0,    // pontos mínimos da bárbara
+    maxBarbarianPoints: 9999, // pontos máximos da bárbara
+};
+
+// ═══════════════════════════════════════════════════════
+//  ESTADO INTERNO
+// ═══════════════════════════════════════════════════════
+let isRunning = false;
+let intervalHandle = null;
+let attackLog = [];
+let roundCount = 0;
+let totalAttacks = 0;
+
+
+// ═══════════════════════════════════════════════════════
+//  UTILITÁRIOS
+// ═══════════════════════════════════════════════════════
+function log(msg, type = 'info') {
+    const time = new Date().toLocaleTimeString('pt-BR');
+    attackLog.unshift({ time, msg, type });
+    if (attackLog.length > 100) attackLog.pop();
+    if (scriptConfig.isDebug) console.log(`[BarbarianFarmer ${time}] ${msg}`);
+    updateLogUI();
+}
+
+function sleep(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+
+// ═══════════════════════════════════════════════════════
+//  BUSCAR VILAS BÁRBARAS — usa twSDK.worldDataAPI()
+// ═══════════════════════════════════════════════════════
+async function fetchBarbarianVillages() {
+    log('Buscando vilas bárbaras via twSDK...');
+
+    // worldDataAPI retorna array de arrays:
+    // village: [villageId, villageName, x, y, playerId, points, type]
+    const villages = await twSDK.worldDataAPI('village');
+
+    const myX = parseInt(game_data.village.x);
+    const myY = parseInt(game_data.village.y);
+
+    const barbarians = villages
+        .filter(v => {
+            const playerId = parseInt(v[4]);
+            const points = parseInt(v[5]);
+            const x = parseInt(v[2]);
+            const y = parseInt(v[3]);
+            const dist = twSDK.calculateDistance(
+                `${myX}|${myY}`,
+                `${x}|${y}`
+            );
+            return (
+                playerId === 0 &&                              // sem dono = bárbara
+                dist <= FARMER_CONFIG.maxDistance &&
+                points >= FARMER_CONFIG.minBarbarianPoints &&
+                points <= FARMER_CONFIG.maxBarbarianPoints
+            );
+        })
+        .map(v => ({
+            villageId: parseInt(v[0]),
+            villageName: v[1],
+            x: parseInt(v[2]),
+            y: parseInt(v[3]),
+            points: parseInt(v[5]),
+            dist: parseFloat(twSDK.calculateDistance(
+                `${myX}|${myY}`,
+                `${v[2]}|${v[3]}`
+            )),
+        }))
+        .sort((a, b) => a.dist - b.dist); // mais próximas primeiro
+
+    log(`${barbarians.length} bárbaras encontradas no raio de ${FARMER_CONFIG.maxDistance} campos.`, 'success');
+    return barbarians;
+}
+
+// ═══════════════════════════════════════════════════════
+//  ENVIAR ATAQUE — POST na praça + confirmação
+// ═══════════════════════════════════════════════════════
+async function sendAttack(target) {
+    try {
+        const parser = new DOMParser();
+
+        // 1. Abre a praça apontando para o alvo
+        const placeHtml = await jQuery.get(
+            `/game.php?village=${game_data.village.id}&screen=place&target=${target.villageId}`
+        );
+        const placeDoc = parser.parseFromString(placeHtml, 'text/html');
+
+        const csrf = placeDoc.querySelector('input[name="h"]')?.value
+            || window.csrf_token;
+        if (!csrf) {
+            log(`CSRF não encontrado → ${target.x}|${target.y}`, 'error');
+            return false;
+        }
+
+        // 2. Monta o POST de confirmação
+        const allUnits = ['spear', 'sword', 'axe', 'archer', 'heavy', 'ram', 'catapult', 'knight', 'snob'];
+        const postData = {
+            attack: 1,
+            x: target.x,
+            y: target.y,
+            light: FARMER_CONFIG.lightCavalry,
+            spy: FARMER_CONFIG.spy,
+            h: csrf,
+        };
+        allUnits.forEach(u => { postData[u] = 0; });
+
+        // 3. Tela de confirmação
+        const confirmHtml = await jQuery.ajax({
+            url: `/game.php?village=${game_data.village.id}&screen=place&try=confirm`,
+            method: 'POST',
+            data: postData,
+        });
+        const confirmDoc = parser.parseFromString(confirmHtml, 'text/html');
+
+        const confirmForm = confirmDoc.querySelector('#command-data-form')
+            || confirmDoc.querySelector('form[action*="place"]');
+        if (!confirmForm) {
+            log(`Sem tela de confirmação → ${target.x}|${target.y}`, 'error');
+            return false;
+        }
+
+        // 4. Coleta campos ocultos e envia o ataque definitivo
+        const confirmData = {};
+        confirmForm.querySelectorAll('input').forEach(i => {
+            if (i.name) confirmData[i.name] = i.value;
+        });
+        confirmData.h = csrf;
+
+        const actionUrl = confirmForm.getAttribute('action')
+            || `/game.php?village=${game_data.village.id}&screen=place&action=command`;
+
+        await jQuery.ajax({ url: actionUrl, method: 'POST', data: confirmData });
+
+        log(`✓ ${target.x}|${target.y} — ${target.points} pts / ${target.dist.toFixed(1)} campos`, 'success');
+        totalAttacks++;
+        updateStatsUI();
+        return true;
+
+    } catch (err) {
+        log(`✗ Erro → ${target.x}|${target.y}: ${err.statusText || err.message}`, 'error');
+        return false;
+    }
+}
+
+// ═══════════════════════════════════════════════════════
+//  RODADA DE ATAQUES
+// ═══════════════════════════════════════════════════════
+async function runAttackRound() {
+    if (!isRunning) return;
+    roundCount++;
+    log(`══ Rodada #${roundCount} ══`);
+    updateStatsUI();
+
+    // Verificar tropas disponíveis direto do DOM (estamos no contexto do jogo)
+    const lightAvailable = parseInt(
+        jQuery('#unit_light a').first().text() ||
+        jQuery('[data-unit="light"] .unit-count').first().text() ||
+        '0'
+    );
+    const spyAvailable = parseInt(
+        jQuery('#unit_spy a').first().text() ||
+        jQuery('[data-unit="spy"] .unit-count').first().text() ||
+        '0'
+    );
+
+    log(`Tropas — LC: ${lightAvailable} | Exp: ${spyAvailable}`);
+
+    const maxByTroops = Math.floor(
+        Math.min(
+            lightAvailable / FARMER_CONFIG.lightCavalry,
+            spyAvailable / FARMER_CONFIG.spy
+        )
+    );
+
+    if (maxByTroops <= 0) {
+        log('Sem tropas suficientes. Aguardando próxima rodada...', 'warn');
+        return;
+    }
+
+    const attacksToSend = Math.min(maxByTroops, FARMER_CONFIG.maxAttacksPerRound);
+    const barbarians = await fetchBarbarianVillages();
+
+    if (barbarians.length === 0) {
+        log('Nenhuma bárbara encontrada no raio.', 'warn');
+        return;
+    }
+
+    let sent = 0;
+    for (const village of barbarians) {
+        if (!isRunning || sent >= attacksToSend) break;
+        const ok = await sendAttack(village);
+        if (ok) sent++;
+        // Delay entre requisições (twSDK.delayBetweenRequests = 200ms por padrão,
+        // mas usamos mais para simular comportamento humano)
+        await sleep(twSDK.delayBetweenRequests + 1000 + Math.random() * 1000);
+    }
+
+    log(`Rodada #${roundCount}: ${sent} ataques enviados.`, 'success');
+    updateControlUI();
+}
+
+// ═══════════════════════════════════════════════════════
+//  CONTROLE
+// ═══════════════════════════════════════════════════════
+function start() {
+    if (isRunning) return;
+    isRunning = true;
+    log('Auto Farmer iniciado.', 'success');
+    updateControlUI();
+    runAttackRound();
+    intervalHandle = setInterval(runAttackRound, FARMER_CONFIG.intervalMinutes * 60 * 1000);
+}
+
+function stop() {
+    if (!isRunning) return;
+    isRunning = false;
+    clearInterval(intervalHandle);
+    intervalHandle = null;
+    log('Auto Farmer pausado.', 'warn');
+    updateControlUI();
+}
+
+// ═══════════════════════════════════════════════════════
+//  INTERFACE — usa twSDK.renderFixedWidget()
+// ═══════════════════════════════════════════════════════
+function buildUI() {
+    const customStyle = `
+        .bf-grid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 6px; margin-bottom: 12px; }
+        .bf-stat { text-align: center; border: 1px solid #bd9c5a; border-radius: 4px; padding: 6px 4px; background: #fff5da; }
+        .bf-stat .val { font-size: 20px; font-weight: 700; color: #7a3a00; display: block; }
+        .bf-stat .lbl { font-size: 10px; color: #9a7040; display: block; }
+        .bf-controls { display: flex; gap: 6px; margin-bottom: 10px; }
+        .bf-controls .btn-confirm-yes { flex: 1; text-align: center; padding: 4px 0; }
+        .bf-field { display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; font-size: 12px; }
+        .bf-field input { width: 70px; text-align: right; padding: 2px 4px; border: 1px solid #bd9c5a; border-radius: 3px; background: #fff8e8; }
+        .bf-status { display: flex; align-items: center; gap: 6px; margin-bottom: 10px; font-size: 12px; }
+        .bf-dot { width: 9px; height: 9px; border-radius: 50%; background: #999; flex-shrink: 0; }
+        .bf-dot.on  { background: #5a9a10; box-shadow: 0 0 5px #5a9a10; }
+        .bf-dot.off { background: #cc3020; }
+        .bf-log { max-height: 130px; overflow-y: auto; border: 1px solid #bd9c5a; border-radius: 3px; padding: 4px; background: #fffdf5; }
+        .bf-entry { font-size: 10px; padding: 2px 4px; border-left: 2px solid #ccc; margin-bottom: 2px; color: #555; }
+        .bf-entry.success { border-color: #5a9a10; color: #3a6a00; }
+        .bf-entry.error   { border-color: #cc3020; color: #8a1010; }
+        .bf-entry.warn    { border-color: #cc8020; color: #7a5000; }
+        .bf-entry.info    { border-color: #5080aa; color: #305070; }
+        .bf-time { opacity: 0.6; margin-right: 4px; }
+        .bf-section-title { font-weight: 700; font-size: 11px; color: #7a5020; margin-bottom: 6px; text-transform: uppercase; letter-spacing: 0.5px; }
+    `;
+
+    const body = `
+        <!-- Stats -->
+        <div class="bf-grid" id="bf-stats">
+            <div class="bf-stat"><span class="val" id="bf-rounds">0</span><span class="lbl">Rodadas</span></div>
+            <div class="bf-stat"><span class="val" id="bf-attacks">0</span><span class="lbl">Ataques</span></div>
+            <div class="bf-stat"><span class="val" id="bf-interval">${FARMER_CONFIG.intervalMinutes}m</span><span class="lbl">Intervalo</span></div>
+        </div>
+ 
+        <!-- Status -->
+        <div class="bf-status">
+            <div class="bf-dot off" id="bf-dot"></div>
+            <span id="bf-status-text">Parado — próxima: <strong id="bf-next">—</strong></span>
+        </div>
+ 
+        <!-- Controles -->
+        <div class="bf-controls">
+            <a href="#" class="btn-confirm-yes" id="bf-btn-start">▶ Iniciar</a>
+            <a href="#" class="btn-confirm-yes" id="bf-btn-stop">■ Parar</a>
+            <a href="#" class="btn-confirm-yes" id="bf-btn-now">↺ Agora</a>
+        </div>
+ 
+        <!-- Configurações -->
+        <div class="bf-section-title">⚙ Configurações</div>
+        <div class="bf-field">
+            <label>🐴 Cavalarias Leves</label>
+            <input type="number" id="bf-cfg-light" min="1" max="500" value="${FARMER_CONFIG.lightCavalry}">
+        </div>
+        <div class="bf-field">
+            <label>🔭 Exploradores</label>
+            <input type="number" id="bf-cfg-spy" min="1" max="50" value="${FARMER_CONFIG.spy}">
+        </div>
+        <div class="bf-field">
+            <label>📏 Distância máx. (campos)</label>
+            <input type="number" id="bf-cfg-dist" min="1" max="200" value="${FARMER_CONFIG.maxDistance}">
+        </div>
+        <div class="bf-field">
+            <label>⏱ Intervalo (minutos)</label>
+            <input type="number" id="bf-cfg-interval" min="5" max="480" value="${FARMER_CONFIG.intervalMinutes}">
+        </div>
+        <div class="bf-field">
+            <label>🎯 Máx. ataques/rodada</label>
+            <input type="number" id="bf-cfg-max" min="1" max="50" value="${FARMER_CONFIG.maxAttacksPerRound}">
+        </div>
+ 
+        <!-- Log -->
+        <div class="bf-section-title ra-mt15">📋 Log</div>
+        <div class="bf-log" id="bf-log"></div>
+    `;
+
+    // twSDK.renderFixedWidget(body, id, cssClass, customStyle, width)
+    twSDK.renderFixedWidget(body, 'barbarianFarmer', 'bf', customStyle, '340px');
+
+    // Eventos
+    jQuery('#bf-btn-start').on('click', e => { e.preventDefault(); applyConfig(); start(); });
+    jQuery('#bf-btn-stop').on('click', e => { e.preventDefault(); stop(); });
+    jQuery('#bf-btn-now').on('click', e => { e.preventDefault(); applyConfig(); runAttackRound(); });
+}
+
+function applyConfig() {
+    FARMER_CONFIG.lightCavalry = parseInt(jQuery('#bf-cfg-light').val()) || FARMER_CONFIG.lightCavalry;
+    FARMER_CONFIG.spy = parseInt(jQuery('#bf-cfg-spy').val()) || FARMER_CONFIG.spy;
+    FARMER_CONFIG.maxDistance = parseInt(jQuery('#bf-cfg-dist').val()) || FARMER_CONFIG.maxDistance;
+    FARMER_CONFIG.intervalMinutes = parseInt(jQuery('#bf-cfg-interval').val()) || FARMER_CONFIG.intervalMinutes;
+    FARMER_CONFIG.maxAttacksPerRound = parseInt(jQuery('#bf-cfg-max').val()) || FARMER_CONFIG.maxAttacksPerRound;
+}
+
+function updateStatsUI() {
+    jQuery('#bf-rounds').text(roundCount);
+    jQuery('#bf-attacks').text(totalAttacks);
+    jQuery('#bf-interval').text(FARMER_CONFIG.intervalMinutes + 'm');
+}
+
+function updateControlUI() {
+    if (isRunning) {
+        jQuery('#bf-dot').removeClass('off').addClass('on');
+        const next = new Date(Date.now() + FARMER_CONFIG.intervalMinutes * 60000);
+        jQuery('#bf-status-text').html(`Rodando — próxima: <strong>${next.toLocaleTimeString('pt-BR')}</strong>`);
+    } else {
+        jQuery('#bf-dot').removeClass('on').addClass('off');
+        jQuery('#bf-status-text').html('Parado — próxima: <strong id="bf-next">—</strong>');
+    }
+}
+
+function updateLogUI() {
+    const html = attackLog.slice(0, 40).map(e =>
+        `<div class="bf-entry ${e.type}"><span class="bf-time">${e.time}</span>${e.msg}</div>`
+    ).join('');
+    jQuery('#bf-log').html(html);
+}
+
+// ═══════════════════════════════════════════════════════
+//  ENTRY POINT — carrega o twSDK e inicializa
+// ═══════════════════════════════════════════════════════
 (async function () {
+    // Carrega o twSDK caso ainda não esteja disponível
+    if (typeof twSDK === 'undefined') {
+        await new Promise((resolve, reject) => {
+            const s = document.createElement('script');
+            s.src = 'https://cdn.jsdelivr.net/gh/RedAlertTW/Tribal-Wars-Scripts-SDK@main/twSDK.js';
+            s.onload = resolve;
+            s.onerror = () => reject(new Error('Falha ao carregar twSDK'));
+            document.head.appendChild(s);
+        });
+    }
 
-    // Initialize Library
+    // Inicializa o twSDK com o scriptConfig
     await twSDK.init(scriptConfig);
-    const isValidScreen = twSDK.checkValidLocation('screen');
-    const isValidMode = twSDK.checkValidLocation('mode');
 
-    console.log('isValidScreen', isValidScreen);
-    console.log('isValidMode', isValidMode);
+    // Constrói a interface e loga o início
+    buildUI();
+    log(`Script carregado — Vila: ${game_data.village.name} (${game_data.village.x}|${game_data.village.y})`);
+    log(`LC: ${FARMER_CONFIG.lightCavalry} | Exp: ${FARMER_CONFIG.spy} | raio: ${FARMER_CONFIG.maxDistance} campos | intervalo: ${FARMER_CONFIG.intervalMinutes}min`);
 })();
