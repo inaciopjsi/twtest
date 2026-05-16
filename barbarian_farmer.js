@@ -2059,22 +2059,31 @@ async function runAttackRound() {
     // e armazena a quantidade em <strong data-count="UNIDADE">NUMERO</strong>
     // Exemplo: <tr class="home_unit ..."><td>...<strong data-count="light">986</strong>...</td></tr>
     function getHomeUnitCount(unit) {
-        // Primeiro tenta pelo widget de visão geral (tela overview)
-        const fromWidget = jQuery('.home_unit strong[data-count="' + unit + '"]').first().text().trim();
-        if (fromWidget !== '') return parseInt(fromWidget) || 0;
-
-        // Fallback: VillageOverview.units[1] é o objeto de tropas em casa (índice 1 = home)
-        // Disponível globalmente quando o widget está carregado
+        // VillageOverview.units[1] = tropas em casa (índice fixo do jogo)
+        // O valor pode ser um objeto completo (unidade existe) ou string "0" (não existe)
+        // A quantidade em casa NÃO vem no objeto — vem no DOM da linha home_unit
         try {
             const homeUnits = VillageOverview.units[1];
-            if (homeUnits && homeUnits[unit] && typeof homeUnits[unit] === 'object') {
-                // quando é objeto completo, a quantidade não vem aqui;
-                // nesse caso usa o texto do DOM mesmo
+            if (homeUnits) {
+                const entry = homeUnits[unit];
+                // Se é string "0" ou null, a unidade não existe nessa vila
+                if (entry === '0' || entry === null || entry === undefined) return 0;
+                // Se é objeto, a unidade existe — buscar quantidade no DOM
             }
-            if (homeUnits && typeof homeUnits[unit] === 'string') {
-                return parseInt(homeUnits[unit]) || 0;
-            }
-        } catch (e) { /* VillageOverview pode não estar disponível em todas as telas */ }
+        } catch (e) { /* VillageOverview indisponível, segue para DOM */ }
+
+        // DOM: tenta home_unit primeiro (visão separada), depois all_unit (visão "Todos")
+        // Ambas têm <strong data-count="UNIT">NUMERO</strong>
+        // Nota: quando o widget está em modo "Todos", as linhas home_unit ficam ocultas
+        // mas ainda existem no DOM com os valores corretos de tropas em casa
+        const selectors = [
+            '.home_unit strong[data-count="' + unit + '"]',
+            '.all_unit strong[data-count="' + unit + '"]',
+        ];
+        for (const sel of selectors) {
+            const val = jQuery(sel).first().text().trim();
+            if (val !== '') return parseInt(val) || 0;
+        }
 
         return 0;
     }
