@@ -1895,12 +1895,12 @@ window.twSDK = {
 //  PARÂMETROS DO FARMER — edite aqui
 // ═══════════════════════════════════════════════════════
 const FARMER_CONFIG = {
-    lightCavalry: 3,    // LC por ataque
+    lightCavalry: 20,    // LC por ataque
     spy: 1,    // Exploradores por ataque
-    maxDistance: 20,   // raio máximo (em campos)
+    maxDistance: 40,   // raio máximo (em campos)
     intervalMinutes: 30,   // minutos entre rodadas
     minBarbarianPoints: 0,    // pontos mínimos da bárbara
-    maxBarbarianPoints: 9999, // pontos máximos da bárbara
+    maxBarbarianPoints: 1500, // pontos máximos da bárbara
 };
 
 // ═══════════════════════════════════════════════════════
