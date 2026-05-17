@@ -8,6 +8,9 @@
 // ═══════════════════════════════════════════════════════
 //  scriptConfig — configuração exigida pelo twSDK.init()
 // ═══════════════════════════════════════════════════════
+
+const STORAGE_KEY = `bf_state_${game_data.village.id}`;
+
 var scriptConfig = {
     scriptData: {
         name: 'Barbarian Farmer',
@@ -1933,25 +1936,81 @@ function sleep(ms) {
 // ═══════════════════════════════════════════════════════
 function waitForCaptcha() {
     return new Promise(resolve => {
-        // Verifica se já há captcha visível
-        if (jQuery('#bot_check_container, #captcha, .bot-check').length === 0) {
+        // Seletores baseados no HTML real do TW
+        const captchaSelectors = [
+            '.bot-protection-row',      // linha com o título "Proteção contra Bots"
+            '.bot-protection-blur',     // overlay de blur no conteúdo
+            '.captcha iframe',          // iframe do hCaptcha
+        ];
+
+        const isCaptchaVisible = () =>
+            captchaSelectors.some(sel => jQuery(sel).length > 0);
+
+        if (!isCaptchaVisible()) {
             resolve();
             return;
         }
 
-        log('⚠ Verificação antibot detectada! Aguardando resolução...', 'warn');
+        log('⚠ hCaptcha detectado! Resolva manualmente para continuar...', 'warn');
+        updateCaptchaUI(true);
 
-        // Observa o DOM até o captcha desaparecer
         const observer = new MutationObserver(() => {
-            if (jQuery('#bot_check_container, #captcha, .bot-check').length === 0) {
+            if (!isCaptchaVisible()) {
                 observer.disconnect();
-                log('✓ Verificação concluída. Retomando ataques...', 'success');
-                resolve();
+                log('✓ Captcha resolvido. Retomando em 3s...', 'success');
+                updateCaptchaUI(false);
+                setTimeout(resolve, 3000); // pequena espera após resolução
             }
         });
 
         observer.observe(document.body, { childList: true, subtree: true });
     });
+}
+
+// ═══════════════════════════════════════════════════════
+//  ATUALIZA O CAPTCHA
+// ═══════════════════════════════════════════════════════
+function updateCaptchaUI(active) {
+    if (active) {
+        jQuery('#bf-dot').removeClass('on off').css('background', '#cc8020');
+        jQuery('#bf-status-text').html('⚠ <strong>Captcha pendente!</strong> Resolva no jogo.');
+    } else {
+        updateControlUI(); // restaura status normal
+    }
+}
+
+// ═══════════════════════════════════════════════════════
+//  SALVA O ESTADO DO FARMER
+// ═══════════════════════════════════════════════════════
+function saveState() {
+    const state = {
+        isRunning,
+        roundCount,
+        totalAttacks,
+        nextRoundAt: intervalHandle ? Date.now() + FARMER_CONFIG.intervalMinutes * 60000 : null,
+        config: { ...FARMER_CONFIG },
+    };
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+}
+
+// ═══════════════════════════════════════════════════════
+//  CARREGA O ESTADO DO FARMER
+// ═══════════════════════════════════════════════════════
+function loadState() {
+    try {
+        const raw = localStorage.getItem(STORAGE_KEY);
+        if (!raw) return null;
+        return JSON.parse(raw);
+    } catch {
+        return null;
+    }
+}
+
+// ═══════════════════════════════════════════════════════
+//  LIMPA O ESTADO DO FARMER
+// ═══════════════════════════════════════════════════════
+function clearState() {
+    localStorage.removeItem(STORAGE_KEY);
 }
 
 // ═══════════════════════════════════════════════════════
@@ -2161,6 +2220,7 @@ async function runAttackRound() {
             if (val !== '') return parseInt(val) || 0;
         }
 
+        saveState();
         return 0;
     }
 
@@ -2216,6 +2276,7 @@ function start() {
     runAttackRound();
     applyAutoInterval();
     intervalHandle = setInterval(runAttackRound, FARMER_CONFIG.intervalMinutes * 60 * 1000);
+    saveState();
 }
 
 function stop() {
@@ -2225,6 +2286,7 @@ function stop() {
     intervalHandle = null;
     log('Auto Farmer pausado.', 'warn');
     updateControlUI();
+    clearState();
 }
 
 // ═══════════════════════════════════════════════════════
@@ -2387,4 +2449,46 @@ function updateLogUI() {
     buildUI();
     log(`Script carregado — Vila: ${game_data.village.name} (${game_data.village.x}|${game_data.village.y})`);
     log(`LC: ${FARMER_CONFIG.lightCavalry} | Exp: ${FARMER_CONFIG.spy} | raio: ${FARMER_CONFIG.maxDistance} campos | intervalo: ${FARMER_CONFIG.intervalMinutes}min`);
+
+    // Restaura estado após reload
+    const saved = loadState();
+    if (saved) {
+        // Restaura config
+        Object.assign(FARMER_CONFIG, saved.config);
+        jQuery('#bf-cfg-light').val(FARMER_CONFIG.lightCavalry);
+        jQuery('#bf-cfg-spy').val(FARMER_CONFIG.spy);
+        jQuery('#bf-cfg-dist').val(FARMER_CONFIG.maxDistance);
+        jQuery('#bf-cfg-interval').val(FARMER_CONFIG.intervalMinutes);
+        jQuery('#bf-cfg-max').val(FARMER_CONFIG.maxAttacksPerRound);
+
+        // Restaura contadores
+        roundCount = saved.roundCount;
+        totalAttacks = saved.totalAttacks;
+        updateStatsUI();
+
+        if (saved.isRunning) {
+            log('♻ Estado restaurado após reload. Retomando...', 'warn');
+
+            const now = Date.now();
+            const msUntilNext = saved.nextRoundAt ? saved.nextRoundAt - now : 0;
+
+            isRunning = true;
+            updateControlUI();
+
+            if (msUntilNext > 0) {
+                // Ainda há tempo — agenda para o horário original
+                log(`⏳ Próxima rodada em ${Math.ceil(msUntilNext / 60000)}min (horário preservado)`, 'info');
+                setTimeout(() => {
+                    runAttackRound();
+                    restartInterval();
+                }, msUntilNext);
+            } else {
+                // Já passou o horário — roda imediatamente
+                log('⚡ Horário já passou. Rodando imediatamente...', 'info');
+                runAttackRound();
+                restartInterval();
+            }
+        }
+    }
+
 })();
