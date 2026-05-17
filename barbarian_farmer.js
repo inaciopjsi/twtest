@@ -1897,7 +1897,7 @@ window.twSDK = {
 const FARMER_CONFIG = {
     lightCavalry: 20,    // LC por ataque
     spy: 1,    // Exploradores por ataque
-    maxDistance: 40,   // raio máximo (em campos)
+    maxDistance: 20,   // raio máximo (em campos)
     intervalMinutes: 30,   // minutos entre rodadas
     minBarbarianPoints: 0,    // pontos mínimos da bárbara
     maxBarbarianPoints: 1500, // pontos máximos da bárbara
@@ -1972,7 +1972,7 @@ async function fetchLightSpeed() {
 // ═══════════════════════════════════════════════════════
 async function applyAutoInterval() {
     try {
-        const speed = await fetchLightSpeed(); // segundos por campo
+        const speed = await fetchLightSpeed() * 60; // minutos por campo
         const travelSeconds = speed * FARMER_CONFIG.maxDistance; // ida
         const roundTripSeconds = travelSeconds * 2;              // ida + volta
         const withBuffer = roundTripSeconds * 1.15;              // +15%
