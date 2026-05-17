@@ -1901,6 +1901,7 @@ const FARMER_CONFIG = {
     intervalMinutes: 30,   // minutos entre rodadas
     minBarbarianPoints: 0,    // pontos mínimos da bárbara
     maxBarbarianPoints: 1500, // pontos máximos da bárbara
+    maxAttacksPerRound: 10,
 };
 
 // ═══════════════════════════════════════════════════════
@@ -1951,6 +1952,39 @@ function waitForCaptcha() {
 
         observer.observe(document.body, { childList: true, subtree: true });
     });
+}
+
+// ═══════════════════════════════════════════════════════
+//  BUSCA VELOCIDADE DO LC
+// ═══════════════════════════════════════════════════════
+async function fetchLightSpeed() {
+    const response = await jQuery.get('/interface.php?func=get_unit_info');
+    const xml = typeof response === 'string'
+        ? jQuery.parseXML(response)
+        : response;
+    const speed = parseFloat(jQuery(xml).find('light > speed').text());
+    if (isNaN(speed) || speed <= 0) throw new Error('Speed inválido no XML');
+    return speed;
+}
+
+// ═══════════════════════════════════════════════════════
+//  CALCULA O INTERVALO AUTOMÁTICO
+// ═══════════════════════════════════════════════════════
+async function applyAutoInterval() {
+    try {
+        const speed = await fetchLightSpeed(); // segundos por campo
+        const travelSeconds = speed * FARMER_CONFIG.maxDistance; // ida
+        const roundTripSeconds = travelSeconds * 2;              // ida + volta
+        const withBuffer = roundTripSeconds * 1.15;              // +15%
+        const minutes = Math.ceil(withBuffer / 60);
+
+        FARMER_CONFIG.intervalMinutes = minutes;
+        jQuery('#bf-cfg-interval').val(minutes);
+
+        log(`⏱ Intervalo auto: ${minutes}min (${FARMER_CONFIG.maxDistance} campos × ${speed}s × 2 + 15%)`, 'success');
+    } catch (err) {
+        log(`✗ Erro ao buscar velocidade da tropa: ${err.message}`, 'error');
+    }
 }
 
 // ═══════════════════════════════════════════════════════
@@ -2130,8 +2164,10 @@ async function runAttackRound() {
         return;
     }
 
+    const attacksToSend = Math.min(maxByTroops, FARMER_CONFIG.maxAttacksPerRound);
+
     const barbarians = await fetchBarbarianVillages();
-    const attacksToSend = Math.min(maxByTroops, barbarians.length);
+
     if (barbarians.length === 0) {
         log('Nenhuma bárbara encontrada no raio.', 'warn');
         return;
@@ -2162,6 +2198,7 @@ function start() {
     updateControlUI();
     runAttackRound();
     intervalHandle = setInterval(runAttackRound, FARMER_CONFIG.intervalMinutes * 60 * 1000);
+    await applyAutoInterval();
 }
 
 function stop() {
@@ -2219,8 +2256,13 @@ function buildUI() {
             <a href="#" class="btn-confirm-yes" id="bf-btn-start">▶ Iniciar</a>
             <a href="#" class="btn-confirm-yes" id="bf-btn-stop">■ Parar</a>
             <a href="#" class="btn-confirm-yes" id="bf-btn-now">↺ Agora</a>
+            <a href="#" class="btn-confirm-yes" id="bf-btn-scan">🔍 Escanear</a>
+            <a href="#" class="btn-confirm-yes" id="bf-btn-autointerval">⏱ Auto</a>
         </div>
- 
+        <div class="bf-field">
+            <label>🏘 Bárbaras no raio</label>
+            <span id="bf-barb-count" style="font-weight:700; color:#7a3a00;">—</span>
+        </div>
         <!-- Configurações -->
         <div class="bf-section-title">⚙ Configurações</div>
         <div class="bf-field">
@@ -2239,7 +2281,10 @@ function buildUI() {
             <label>⏱ Intervalo (minutos)</label>
             <input type="number" id="bf-cfg-interval" min="5" max="480" value="${FARMER_CONFIG.intervalMinutes}">
         </div>
- 
+        <div class="bf-field">
+            <label>🎯 Máx. ataques/rodada</label>
+            <input type="number" id="bf-cfg-max" min="1" max="50" value="${FARMER_CONFIG.maxAttacksPerRound}">
+        </div>
         <!-- Log -->
         <div class="bf-section-title ra-mt15">📋 Log</div>
         <div class="bf-log" id="bf-log"></div>
@@ -2252,6 +2297,18 @@ function buildUI() {
     jQuery('#bf-btn-start').on('click', e => { e.preventDefault(); applyConfig(); start(); });
     jQuery('#bf-btn-stop').on('click', e => { e.preventDefault(); stop(); });
     jQuery('#bf-btn-now').on('click', e => { e.preventDefault(); applyConfig(); runAttackRound(); });
+    jQuery('#bf-btn-scan').on('click', async e => {
+        e.preventDefault();
+        applyConfig();
+        jQuery('#bf-barb-count').text('...');
+        const barbarians = await fetchBarbarianVillages();
+        jQuery('#bf-barb-count').text(barbarians.length);
+    });
+    jQuery('#bf-btn-autointerval').on('click', async e => {
+        e.preventDefault();
+        applyConfig(); // garante que maxDistance está atualizado antes do cálculo
+        await applyAutoInterval();
+    });
 }
 
 function applyConfig() {
@@ -2259,6 +2316,7 @@ function applyConfig() {
     FARMER_CONFIG.spy = parseInt(jQuery('#bf-cfg-spy').val()) || FARMER_CONFIG.spy;
     FARMER_CONFIG.maxDistance = parseInt(jQuery('#bf-cfg-dist').val()) || FARMER_CONFIG.maxDistance;
     FARMER_CONFIG.intervalMinutes = parseInt(jQuery('#bf-cfg-interval').val()) || FARMER_CONFIG.intervalMinutes;
+    FARMER_CONFIG.maxAttacksPerRound = parseInt(jQuery('#bf-cfg-max').val()) || FARMER_CONFIG.maxAttacksPerRound;
 }
 
 function updateStatsUI() {
