@@ -2198,7 +2198,7 @@ function start() {
     updateControlUI();
     runAttackRound();
     intervalHandle = setInterval(runAttackRound, FARMER_CONFIG.intervalMinutes * 60 * 1000);
-    await applyAutoInterval();
+    applyAutoInterval();
 }
 
 function stop() {
