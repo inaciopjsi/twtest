@@ -1915,6 +1915,7 @@ let intervalHandle = null;
 let attackLog = [];
 let roundCount = 0;
 let totalAttacks = 0;
+let nextRoundAt = null; // novo — horário fixo da próxima rodada
 
 // ═══════════════════════════════════════════════════════
 //  UTILITÁRIOS
@@ -1987,7 +1988,7 @@ function saveState() {
         isRunning,
         roundCount,
         totalAttacks,
-        nextRoundAt: intervalHandle ? Date.now() + FARMER_CONFIG.intervalMinutes * 60000 : null,
+        nextRoundAt, // ← usa o valor fixo, não recalcula
         config: { ...FARMER_CONFIG },
     };
     localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
@@ -2220,7 +2221,6 @@ async function runAttackRound() {
             if (val !== '') return parseInt(val) || 0;
         }
 
-        saveState();
         return 0;
     }
 
@@ -2262,7 +2262,10 @@ async function runAttackRound() {
     }
 
     log(`Rodada #${roundCount}: ${sent} ataques enviados.`, 'success');
+
+    nextRoundAt = Date.now() + FARMER_CONFIG.intervalMinutes * 60 * 1000;
     updateControlUI();
+    saveState();
 }
 
 // ═══════════════════════════════════════════════════════
@@ -2271,6 +2274,7 @@ async function runAttackRound() {
 function start() {
     if (isRunning) return;
     isRunning = true;
+    nextRoundAt = Date.now() + FARMER_CONFIG.intervalMinutes * 60 * 1000;
     log('Auto Farmer iniciado.', 'success');
     updateControlUI();
     runAttackRound();
