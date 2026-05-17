@@ -1968,20 +1968,37 @@ async function fetchLightSpeed() {
 }
 
 // ═══════════════════════════════════════════════════════
+//  ATUALIZA O HORÁRIO
+// ═══════════════════════════════════════════════════════
+function restartInterval() {
+    if (intervalHandle) {
+        clearInterval(intervalHandle);
+        intervalHandle = null;
+    }
+    if (isRunning) {
+        intervalHandle = setInterval(runAttackRound, FARMER_CONFIG.intervalMinutes * 60 * 1000);
+        updateControlUI(); // atualiza o horário exibido
+        log(`⏱ Intervalo atualizado para ${FARMER_CONFIG.intervalMinutes}min`, 'info');
+    }
+}
+
+// ═══════════════════════════════════════════════════════
 //  CALCULA O INTERVALO AUTOMÁTICO
 // ═══════════════════════════════════════════════════════
 async function applyAutoInterval() {
     try {
-        const speed = await fetchLightSpeed() * 60; // minutos por campo
-        const travelSeconds = speed * FARMER_CONFIG.maxDistance; // ida
-        const roundTripSeconds = travelSeconds * 2;              // ida + volta
-        const withBuffer = roundTripSeconds * 1.15;              // +15%
+        const speed = await fetchLightSpeed();
+        const travelSeconds = speed * FARMER_CONFIG.maxDistance * 60;
+        const roundTripSeconds = travelSeconds * 2;
+        const withBuffer = roundTripSeconds * 1.15;
         const minutes = Math.ceil(withBuffer / 60);
 
         FARMER_CONFIG.intervalMinutes = minutes;
         jQuery('#bf-cfg-interval').val(minutes);
 
         log(`⏱ Intervalo auto: ${minutes}min (${FARMER_CONFIG.maxDistance} campos × ${speed}s × 2 + 15%)`, 'success');
+
+        restartInterval(); // ← recria o setInterval com o novo valor
     } catch (err) {
         log(`✗ Erro ao buscar velocidade da tropa: ${err.message}`, 'error');
     }
@@ -2294,7 +2311,12 @@ function buildUI() {
     twSDK.renderFixedWidget(body, 'barbarianFarmer', 'bf', customStyle, '340px');
 
     // Eventos
-    jQuery('#bf-btn-start').on('click', e => { e.preventDefault(); applyConfig(); start(); });
+    jQuery('#bf-btn-start').on('click', e => {
+        e.preventDefault();
+        applyConfig();
+        start();
+        restartInterval();
+    });
     jQuery('#bf-btn-stop').on('click', e => { e.preventDefault(); stop(); });
     jQuery('#bf-btn-now').on('click', e => { e.preventDefault(); applyConfig(); runAttackRound(); });
     jQuery('#bf-btn-scan').on('click', async e => {
