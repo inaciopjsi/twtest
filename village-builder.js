@@ -1,5 +1,5 @@
 /*
-    NAME: Village Builder 1.0
+    NAME: Village Builder
     DESCRIPTION: Automação avançada de construções com perfis editáveis,
                  prioridades dinâmicas e persistência por aldeia.
     VERSION: 1.0.0
@@ -9,16 +9,18 @@
 const STORAGE_KEY = `vb_state_${game_data.village.id}`;
 const PROFILES_KEY = `vb_profiles`;
 
-
 const scriptConfig = {
     scriptData: {
-        name: 'Village Builder 2.0',
+        name: 'Village Builder',
         version: 'v2.0.0',
         author: 'inaciopjsi',
         authorUrl: 'https://github.com/inaciopjsi',
         helpLink: 'https://github.com/inaciopjsi',
     },
-    translations: { pt_BR: {}, en_DK: {} },
+    translations: {
+        pt_BR: { 'Village Builder': 'Village Builder', 'Help': 'Ajuda' },
+        en_DK: { 'Village Builder': 'Village Builder', 'Help': 'Help' },
+    },
     allowedMarkets: ['br'],
     allowedScreens: ['main'],
     allowedModes: [],
@@ -1864,14 +1866,18 @@ window.twSDK = {
     },
 };
 
-
-
+// ═══════════════════════════════════════════════════════
+//  PERFIS PADRÃO
+// ═══════════════════════════════════════════════════════
 const DEFAULT_PROFILES = {
     attack: ['main', 'main', 'wood', 'stone', 'iron', 'farm', 'barracks', 'stable', 'smith', 'market'],
     defense: ['main', 'wood', 'stone', 'iron', 'farm', 'barracks', 'smith', 'wall', 'wall', 'storage'],
     economy: ['wood', 'stone', 'iron', 'wood', 'stone', 'iron', 'farm', 'storage', 'main', 'market'],
 };
 
+// ═══════════════════════════════════════════════════════
+//  CONFIGURAÇÃO
+// ═══════════════════════════════════════════════════════
 const CONFIG = {
     intervalMinutes: 2,
     maxQueueSize: 5,
@@ -1881,6 +1887,9 @@ const CONFIG = {
     reloadDelayMs: 3000,
 };
 
+// ═══════════════════════════════════════════════════════
+//  ESTADO INTERNO
+// ═══════════════════════════════════════════════════════
 let profiles = {};
 let timer = null;
 
@@ -1892,10 +1901,9 @@ let state = {
     log: [],
 };
 
-function debug(...args) {
-    if (scriptConfig.isDebug) console.log('[vb]', ...args);
-}
-
+// ═══════════════════════════════════════════════════════
+//  PERSISTÊNCIA
+// ═══════════════════════════════════════════════════════
 function saveState() {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
 }
@@ -1914,32 +1922,36 @@ function loadProfiles() {
     profiles = raw ? JSON.parse(raw) : { ...DEFAULT_PROFILES };
 }
 
-function log(msg) {
-    const t = new Date().toLocaleTimeString('pt-BR');
-    state.log.unshift({ t, msg });
+// ═══════════════════════════════════════════════════════
+//  LOG
+// ═══════════════════════════════════════════════════════
+function log(msg, type = 'info') {
+    const time = new Date().toLocaleTimeString('pt-BR');
+    state.log.unshift({ time, msg, type });
     if (state.log.length > 100) state.log.pop();
+    if (scriptConfig.isDebug) console.log(`[VillageBuilder ${time}] ${msg}`);
     saveState();
-    debug(msg);
     renderLog();
 }
 
 function renderLog() {
     const el = jQuery('#vb-log');
     if (!el.length) return;
-    el.html(state.log.map(x => `<div>[${x.t}] ${x.msg}</div>`).join(''));
+    const html = state.log.slice(0, 40).map(e =>
+        `<div class="vb-entry ${e.type}"><span class="vb-time">${e.time}</span>${e.msg}</div>`
+    ).join('');
+    el.html(html);
 }
 
+// ═══════════════════════════════════════════════════════
+//  HELPERS DE JOGO
+// ═══════════════════════════════════════════════════════
 function getQueueSize() {
     return jQuery('#buildqueue tr').length;
 }
 
-function getBuildButton(building) {
-    return jQuery(`#main_buildrow_${building}`).find('a.btn-build').first();
-}
-
 function getBuildLink(building) {
-    const btn = getBuildButton(building);
-    return btn.length ? btn.attr('href') : null;
+    return jQuery(`#main_buildrow_${building}`).find('a.btn-build').first().attr('href') || null;
 }
 
 function getResources() {
@@ -1955,44 +1967,53 @@ function getResources() {
 
 function getDynamicPriority() {
     const r = getResources();
-
-    if ((r.pop / r.popMax) * 100 >= CONFIG.farmPriorityPercent) {
-        return 'farm';
-    }
-
+    if ((r.pop / r.popMax) * 100 >= CONFIG.farmPriorityPercent) return 'farm';
     const maxRes = Math.max(r.wood, r.stone, r.iron);
-    if ((maxRes / r.storage) * 100 >= CONFIG.storagePriorityPercent) {
-        return 'storage';
-    }
-
+    if ((maxRes / r.storage) * 100 >= CONFIG.storagePriorityPercent) return 'storage';
     return null;
 }
 
-async function waitForCaptcha() {
+// ═══════════════════════════════════════════════════════
+//  CAPTCHA
+// ═══════════════════════════════════════════════════════
+function waitForCaptcha() {
     return new Promise(resolve => {
         const hasCaptcha = () =>
             jQuery('.bot-protection-row, .bot-protection-blur, .captcha iframe').length > 0;
 
         if (!hasCaptcha()) return resolve();
 
-        log('⚠ hCaptcha detectado. Resolva manualmente.');
+        log('⚠ hCaptcha detectado. Resolva manualmente.', 'warn');
+        updateCaptchaUI(true);
 
         const obs = new MutationObserver(() => {
             if (!hasCaptcha()) {
                 obs.disconnect();
-                log('✓ Captcha resolvido.');
+                log('✓ Captcha resolvido.', 'success');
+                updateCaptchaUI(false);
                 setTimeout(resolve, 3000);
             }
         });
-
         obs.observe(document.body, { childList: true, subtree: true });
     });
 }
 
+function updateCaptchaUI(active) {
+    if (active) {
+        jQuery('#vb-dot').removeClass('on off').css('background', '#cc8020');
+        jQuery('#vb-status-text').html('⚠ <strong>Captcha pendente!</strong> Resolva no jogo.');
+    } else {
+        updateControlUI();
+    }
+}
+
+// ═══════════════════════════════════════════════════════
+//  CONSTRUÇÃO
+// ═══════════════════════════════════════════════════════
 async function build(building) {
     const link = getBuildLink(building);
     if (!link) {
-        log(`⏳ Não é possível construir ${building} agora.`);
+        log(`⏳ Não é possível construir ${building} agora.`, 'warn');
         return false;
     }
 
@@ -2001,27 +2022,30 @@ async function build(building) {
     try {
         await jQuery.post(link);
         state.totalBuilds++;
-        saveState();
-        log(`🏗️ Construindo ${building}.`);
+        log(`🏗️ Construindo: ${building}`, 'success');
+        updateStatsUI();
         return true;
     } catch (e) {
         console.error(e);
-        log(`✗ Erro ao construir ${building}.`);
+        log(`✗ Erro ao construir ${building}.`, 'error');
         return false;
     }
 }
 
+// ═══════════════════════════════════════════════════════
+//  CICLO PRINCIPAL
+// ═══════════════════════════════════════════════════════
 async function processQueue() {
     if (!state.isRunning || !state.selectedProfile) return;
 
     if (getQueueSize() >= CONFIG.maxQueueSize) {
-        log('📋 Fila cheia.');
+        log('📋 Fila cheia. Aguardando...', 'warn');
         return;
     }
 
     const priority = getDynamicPriority();
     if (priority) {
-        log(`⭐ Prioridade dinâmica: ${priority}.`);
+        log(`⭐ Prioridade dinâmica: ${priority}`, 'info');
         const ok = await build(priority);
         if (ok && CONFIG.reloadAfterBuild) {
             setTimeout(() => location.reload(), CONFIG.reloadDelayMs);
@@ -2032,19 +2056,19 @@ async function processQueue() {
     const profile = profiles[state.selectedProfile] || [];
 
     if (state.currentStep >= profile.length) {
-        log('🎉 Perfil concluído.');
+        log('🎉 Perfil concluído!', 'success');
         stop();
         return;
     }
 
     const building = profile[state.currentStep];
-    log(`▶ Passo ${state.currentStep + 1}/${profile.length}: ${building}`);
+    log(`▶ Passo ${state.currentStep + 1}/${profile.length}: ${building}`, 'info');
 
     const ok = await build(building);
     if (ok) {
         state.currentStep++;
         saveState();
-        updateUI();
+        updateStatsUI();
 
         if (CONFIG.reloadAfterBuild) {
             setTimeout(() => location.reload(), CONFIG.reloadDelayMs);
@@ -2052,16 +2076,20 @@ async function processQueue() {
     }
 }
 
+// ═══════════════════════════════════════════════════════
+//  CONTROLE
+// ═══════════════════════════════════════════════════════
 function start(profile) {
     state.selectedProfile = profile;
     state.isRunning = true;
     saveState();
-    updateUI();
+    updateControlUI();
+    updateStatsUI();
 
     if (timer) clearInterval(timer);
     timer = setInterval(processQueue, CONFIG.intervalMinutes * 60 * 1000);
 
-    log(`▶ Iniciado perfil ${profile}.`);
+    log(`▶ Iniciado perfil: ${profile}`, 'success');
     processQueue();
 }
 
@@ -2070,8 +2098,8 @@ function stop() {
     if (timer) clearInterval(timer);
     timer = null;
     saveState();
-    updateUI();
-    log('■ Parado.');
+    updateControlUI();
+    log('■ Parado.', 'warn');
 }
 
 function reset() {
@@ -2079,14 +2107,13 @@ function reset() {
     state.totalBuilds = 0;
     state.log = [];
     saveState();
-    updateUI();
+    updateStatsUI();
     renderLog();
-    log('↺ Progresso reiniciado.');
+    log('↺ Progresso reiniciado.', 'info');
 }
 
 function exportProfiles() {
-    const data = JSON.stringify(profiles, null, 2);
-    prompt('Copie o JSON:', data);
+    prompt('Copie o JSON:', JSON.stringify(profiles, null, 2));
 }
 
 function importProfiles() {
@@ -2095,82 +2122,136 @@ function importProfiles() {
     try {
         profiles = JSON.parse(json);
         saveProfiles();
-        log('✓ Perfis importados.');
+        log('✓ Perfis importados.', 'success');
     } catch {
         alert('JSON inválido.');
     }
 }
 
-function updateUI() {
-    jQuery('#vb-status').text(state.isRunning ? 'Rodando' : 'Parado');
-    jQuery('#vb-profile').text(state.selectedProfile || '-');
+// ═══════════════════════════════════════════════════════
+//  INTERFACE
+// ═══════════════════════════════════════════════════════
+function buildUI() {
+    const profile = state.selectedProfile || '—';
+    const profileFull = state.selectedProfile && profiles[state.selectedProfile]
+        ? profiles[state.selectedProfile].length
+        : '—';
+
+    const customStyle = `
+        .vb-grid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 6px; margin-bottom: 12px; }
+        .vb-stat { text-align: center; border: 1px solid #bd9c5a; border-radius: 4px; padding: 6px 4px; background: #fff5da; }
+        .vb-stat .val { font-size: 20px; font-weight: 700; color: #7a3a00; display: block; }
+        .vb-stat .lbl { font-size: 10px; color: #9a7040; display: block; }
+        .vb-controls { display: flex; gap: 6px; margin-bottom: 10px; flex-wrap: wrap; }
+        .vb-controls .btn-confirm-yes { flex: 1; text-align: center; padding: 4px 0; }
+        .vb-status { display: flex; align-items: center; gap: 6px; margin-bottom: 10px; font-size: 12px; }
+        .vb-dot { width: 9px; height: 9px; border-radius: 50%; background: #999; flex-shrink: 0; }
+        .vb-dot.on  { background: #5a9a10; box-shadow: 0 0 5px #5a9a10; }
+        .vb-dot.off { background: #cc3020; }
+        .vb-log { max-height: 130px; overflow-y: auto; border: 1px solid #bd9c5a; border-radius: 3px; padding: 4px; background: #fffdf5; }
+        .vb-entry { font-size: 10px; padding: 2px 4px; border-left: 2px solid #ccc; margin-bottom: 2px; color: #555; }
+        .vb-entry.success { border-color: #5a9a10; color: #3a6a00; }
+        .vb-entry.error   { border-color: #cc3020; color: #8a1010; }
+        .vb-entry.warn    { border-color: #cc8020; color: #7a5000; }
+        .vb-entry.info    { border-color: #5080aa; color: #305070; }
+        .vb-time { opacity: 0.6; margin-right: 4px; }
+        .vb-section-title { font-weight: 700; font-size: 11px; color: #7a5020; margin-bottom: 6px; text-transform: uppercase; letter-spacing: 0.5px; }
+    `;
+
+    const body = `
+        <!-- Stats -->
+        <div class="vb-grid" id="vb-stats">
+            <div class="vb-stat"><span class="val" id="vb-step">0</span><span class="lbl">Passo</span></div>
+            <div class="vb-stat"><span class="val" id="vb-total">0</span><span class="lbl">Construções</span></div>
+            <div class="vb-stat"><span class="val" id="vb-profile-steps">—</span><span class="lbl">Passos</span></div>
+        </div>
+ 
+        <!-- Status -->
+        <div class="vb-status">
+            <div class="vb-dot off" id="vb-dot"></div>
+            <span id="vb-status-text">Parado — perfil: <strong id="vb-profile-name">${profile}</strong></span>
+        </div>
+ 
+        <!-- Perfis -->
+        <div class="vb-section-title">🎯 Selecionar Perfil</div>
+        <div class="vb-controls">
+            <a href="#" class="btn-confirm-yes" id="vb-attack">⚔️ Ataque</a>
+            <a href="#" class="btn-confirm-yes" id="vb-defense">🛡️ Defesa</a>
+            <a href="#" class="btn-confirm-yes" id="vb-economy">🌾 Recursos</a>
+        </div>
+ 
+        <!-- Controles -->
+        <div class="vb-section-title">⚙ Controles</div>
+        <div class="vb-controls">
+            <a href="#" class="btn-confirm-yes" id="vb-run">↺ Executar</a>
+            <a href="#" class="btn-confirm-yes" id="vb-stop">■ Parar</a>
+            <a href="#" class="btn-confirm-yes" id="vb-reset">⟲ Reset</a>
+        </div>
+ 
+        <!-- Perfis customizados -->
+        <div class="vb-section-title">📦 Perfis</div>
+        <div class="vb-controls">
+            <a href="#" class="btn-confirm-yes" id="vb-export">⬆ Exportar</a>
+            <a href="#" class="btn-confirm-yes" id="vb-import">⬇ Importar</a>
+        </div>
+ 
+        <!-- Log -->
+        <div class="vb-section-title ra-mt15">📋 Log</div>
+        <div class="vb-log" id="vb-log"></div>
+    `;
+
+    twSDK.renderFixedWidget(body, 'villageBuilder', 'vb', customStyle, '340px');
+
+    jQuery('#vb-attack').on('click', e => { e.preventDefault(); start('attack'); });
+    jQuery('#vb-defense').on('click', e => { e.preventDefault(); start('defense'); });
+    jQuery('#vb-economy').on('click', e => { e.preventDefault(); start('economy'); });
+    jQuery('#vb-run').on('click', e => { e.preventDefault(); processQueue(); });
+    jQuery('#vb-stop').on('click', e => { e.preventDefault(); stop(); });
+    jQuery('#vb-reset').on('click', e => { e.preventDefault(); reset(); });
+    jQuery('#vb-export').on('click', e => { e.preventDefault(); exportProfiles(); });
+    jQuery('#vb-import').on('click', e => { e.preventDefault(); importProfiles(); });
+}
+
+function updateStatsUI() {
+    const profileLen = state.selectedProfile && profiles[state.selectedProfile]
+        ? profiles[state.selectedProfile].length
+        : '—';
     jQuery('#vb-step').text(state.currentStep);
     jQuery('#vb-total').text(state.totalBuilds);
+    jQuery('#vb-profile-steps').text(profileLen);
 }
 
-function renderUI() {
-    const body = `
-        <div>
-            <p><b>Status:</b> <span id="vb-status"></span></p>
-            <p><b>Perfil:</b> <span id="vb-profile"></span></p>
-            <p><b>Passo:</b> <span id="vb-step"></span></p>
-            <p><b>Construções:</b> <span id="vb-total"></span></p>
-
-            <div style="margin:8px 0;">
-                <button class="btn" id="vb-attack">⚔️ Ataque</button>
-                <button class="btn" id="vb-defense">🛡️ Defesa</button>
-                <button class="btn" id="vb-economy">🌾 Recursos</button>
-            </div>
-
-            <div style="margin:8px 0;">
-                <button class="btn" id="vb-run">↺ Executar</button>
-                <button class="btn" id="vb-stop">■ Parar</button>
-                <button class="btn" id="vb-reset">⟲ Reset</button>
-            </div>
-
-            <div style="margin:8px 0;">
-                <button class="btn" id="vb-export">Exportar</button>
-                <button class="btn" id="vb-import">Importar</button>
-            </div>
-
-            <div id="vb-log" style="max-height:220px;overflow:auto;font-size:11px;border:1px solid #999;background:#fff;padding:5px;"></div>
-        </div>`;
-
-    twSDK.renderBoxWidget(body, 'vb-widget', 'vb-widget');
-
-    jQuery('#vb-attack').on('click', () => start('attack'));
-    jQuery('#vb-defense').on('click', () => start('defense'));
-    jQuery('#vb-economy').on('click', () => start('economy'));
-    jQuery('#vb-run').on('click', processQueue);
-    jQuery('#vb-stop').on('click', stop);
-    jQuery('#vb-reset').on('click', reset);
-    jQuery('#vb-export').on('click', exportProfiles);
-    jQuery('#vb-import').on('click', importProfiles);
-
-    updateUI();
-    renderLog();
-}
-
-(async function () {
-    // Carrega o twSDK caso ainda não esteja disponível
-    if (typeof twSDK === 'undefined') {
-        await new Promise((resolve, reject) => {
-            const s = document.createElement('script');
-            s.src = 'https://cdn.jsdelivr.net/gh/RedAlertTW/Tribal-Wars-Scripts-SDK@main/twSDK.js';
-            s.onload = resolve;
-            s.onerror = () => reject(new Error('Falha ao carregar twSDK'));
-            document.head.appendChild(s);
-        });
+function updateControlUI() {
+    if (state.isRunning) {
+        jQuery('#vb-dot').removeClass('off').addClass('on');
+        jQuery('#vb-status-text').html(
+            `Rodando — perfil: <strong>${state.selectedProfile || '—'}</strong>`
+        );
+    } else {
+        jQuery('#vb-dot').removeClass('on').addClass('off');
+        jQuery('#vb-status-text').html(
+            `Parado — perfil: <strong id="vb-profile-name">${state.selectedProfile || '—'}</strong>`
+        );
     }
+}
 
-    // Inicializa o twSDK com o scriptConfig
+// ═══════════════════════════════════════════════════════
+//  ENTRY POINT
+// ═══════════════════════════════════════════════════════
+(async function () {
     await twSDK.init(scriptConfig);
+
     loadProfiles();
     loadState();
-    renderUI();
+    buildUI();
+    updateStatsUI();
+    updateControlUI();
+    renderLog();
+
+    log(`Script carregado — Vila: ${game_data.village.name} (${game_data.village.x}|${game_data.village.y})`);
 
     if (state.isRunning && state.selectedProfile) {
-        log('↺ Retomando automaticamente.');
+        log('↺ Retomando automaticamente...', 'warn');
         timer = setInterval(processQueue, CONFIG.intervalMinutes * 60 * 1000);
         setTimeout(processQueue, 3000);
     }
