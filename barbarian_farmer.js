@@ -2197,8 +2197,8 @@ function start() {
     log('Auto Farmer iniciado.', 'success');
     updateControlUI();
     runAttackRound();
-    intervalHandle = setInterval(runAttackRound, FARMER_CONFIG.intervalMinutes * 60 * 1000);
     applyAutoInterval();
+    intervalHandle = setInterval(runAttackRound, FARMER_CONFIG.intervalMinutes * 60 * 1000);
 }
 
 function stop() {
