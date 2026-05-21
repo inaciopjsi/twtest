@@ -401,8 +401,69 @@ async function fetchMyVillages() {
 // ═══════════════════════════════════════════════════════
 const BUFFER_MARGIN_MS = 5 * 60 * 1000; // 5 min de margem de segurança
 
+// ═══════════════════════════════════════════════════════
+//  ANÁLISE DE AMEAÇA POR ATACANTE
+//
+//  Conta quantas aldeias DISTINTAS do jogador cada aldeia
+//  atacante está atacando. Quanto mais alvos, mais diluída
+//  a força — logo menor o perigo individual por alvo.
+//
+//  1 alvo  → PERIGO  🔴  (força concentrada)
+//  2 alvos → ATENÇÃO 🟡  (força dividida)
+//  3+      → SEGURO  🟢  (força muito diluída)
+// ═══════════════════════════════════════════════════════
+
+/**
+ * Retorna mapa: attackerCoord → { count, targets: Set<targetCoord>, label, color, icon }
+ */
+function buildAttackerThreatMap(attacks) {
+  const map = {};
+  attacks.forEach((atk) => {
+    const key = atk.attackerCoord || atk.attackerText;
+    if (!map[key]) {
+      map[key] = {
+        count: 0,
+        targets: new Set(),
+        attackerText: atk.attackerText,
+      };
+    }
+    map[key].targets.add(atk.targetCoord);
+  });
+
+  Object.values(map).forEach((entry) => {
+    entry.count = entry.targets.size;
+    if (entry.count === 1) {
+      entry.level = "danger";
+      entry.icon = "🔴";
+      entry.label = "Perigo — ataque concentrado";
+      entry.color = "#c0392b";
+      entry.bg = "#fdecea";
+      entry.border = "#c0392b";
+    } else if (entry.count === 2) {
+      entry.level = "warning";
+      entry.icon = "🟡";
+      entry.label = "Atenção — força dividida";
+      entry.color = "#b7770d";
+      entry.bg = "#fffbe6";
+      entry.border = "#e0a800";
+    } else {
+      entry.level = "safe";
+      entry.icon = "🟢";
+      entry.label = "Seguro — força muito diluída";
+      entry.color = "#1a7a3a";
+      entry.bg = "#eafaf1";
+      entry.border = "#27ae60";
+    }
+  });
+
+  return map;
+}
+
 function buildSupportMap(attacks, villages) {
   if (!attacks.length || !villages.length) return [];
+
+  // Pré-calcula ameaça por atacante
+  const threatMap = buildAttackerThreatMap(attacks);
 
   // Mapa coord → vila
   const byCoord = {};
@@ -474,8 +535,20 @@ function buildSupportMap(attacks, villages) {
     }
 
     // Avisa se a sugestão foi forçada (nenhuma disponível)
+    // Avisa se a sugestão foi forçada (nenhuma disponível)
     const defBusy = freeAt[defender.coord] > needFreeBy && result.length > 0;
     const suppBusy = support && freeAt[support.coord] > needFreeBy;
+
+    // Nível de ameaça do atacante
+    const threatKey = atk.attackerCoord || atk.attackerText;
+    const threat = threatMap[threatKey] || {
+      icon: "🔴",
+      label: "?",
+      color: "#c0392b",
+      bg: "#fdecea",
+      border: "#c0392b",
+      count: 1,
+    };
 
     result.push({
       atk,
@@ -485,6 +558,7 @@ function buildSupportMap(attacks, villages) {
       suppBusy,
       defFreeAt: freeAt[defender.coord],
       suppFreeAt: support ? freeAt[support.coord] : null,
+      threat,
     });
   });
 
@@ -515,6 +589,7 @@ function renderTable(mapData) {
         suppBusy,
         defFreeAt,
         suppFreeAt,
+        threat,
       }) => {
         const tgt = atk.targetCoord;
         const tgtId = atk.targetVillageId;
@@ -555,7 +630,10 @@ function renderTable(mapData) {
                     <strong>${atk.targetText.split(" K")[0]}</strong>
                 </a>
                 <div class="sm-time">🕐 ${fmtDate(atk.arrivalDate)}</div>
-                <div class="sm-attacker">⚔ ${atk.attackerText.split(" K")[0]}</div>
+                <div class="sm-threat" style="color:${threat.color}; background:${threat.bg}; border-left:3px solid ${threat.border}; padding:2px 6px; border-radius:3px; margin-top:3px; font-size:11px;">
+                    ${threat.icon} <strong>${atk.attackerText.split(" K")[0]}</strong>
+                    <span class="sm-threat-count">(${threat.count} alvo${threat.count > 1 ? "s" : ""} — ${threat.label.split(" — ")[1]})</span>
+                </div>
             </td>
             <td class="ra-tal">
                 <a href="${defUrl}" target="_blank">
@@ -576,7 +654,24 @@ function renderTable(mapData) {
     )
     .join("");
 
+  // Resumo de ameaças
+  const threatSummary = {};
+  mapData.forEach(({ threat }) => {
+    if (!threatSummary[threat.level])
+      threatSummary[threat.level] = { threat, count: 0 };
+    threatSummary[threat.level].count++;
+  });
+  const legendHtml = Object.values(threatSummary)
+    .map(
+      ({ threat, count }) =>
+        `<div class="sm-legend-item" style="background:${threat.bg}; border-color:${threat.border}; color:${threat.color};">
+            ${threat.icon} ${threat.label.split(" — ")[0]}: <strong>${count}</strong>
+         </div>`,
+    )
+    .join("");
+
   return `
+        <div class="sm-legend">${legendHtml}</div>
         <div class="ra-table-container">
             <table class="ra-table ra-table-v2" width="100%" cellspacing="1" cellpadding="3">
                 <thead>
@@ -632,6 +727,11 @@ function buildUI() {
         .sm-btn-place { font-size:11px !important; padding:3px 8px !important;
                         display:inline-block; white-space:nowrap; }
         .ra-table td { vertical-align:top !important; }
+        .sm-threat { line-height:1.4; }
+        .sm-threat-count { font-weight:normal; opacity:0.85; }
+        .sm-legend { display:flex; gap:10px; flex-wrap:wrap; margin-bottom:10px; font-size:11px; }
+        .sm-legend-item { display:flex; align-items:center; gap:4px; padding:3px 8px;
+                          border-radius:12px; font-weight:600; border:1px solid; }
     `;
 
   const body = `
