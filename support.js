@@ -1,10 +1,10 @@
 /*
     NAME: Support Map
     DESCRIPTION: Mapa de apoio inteligente para a tela de ataques recebidos.
-                 Calcula tempo de deslocamento real (spear/sword/heavy) para
-                 garantir que a vila de apoio está disponível antes de cada ataque.
-                 Botão direto para a praça de reunião da vila defensora.
-    VERSION: 2.0.0
+                 Calcula tempo de deslocamento real (spear/sword/heavy),
+                 garante disponibilidade das vilas de apoio e indica o nível
+                 de ameaça por aldeia atacante via código de cor.
+    VERSION: 2.1.0
     AUTHOR: inaciopjsi
     SCREEN: overview_villages&mode=incomings
 */
@@ -15,7 +15,7 @@
 var scriptConfig = {
   scriptData: {
     name: "Support Map",
-    version: "v2.0.0",
+    version: "v2.1.0",
     author: "inaciopjsi",
     authorUrl: "https://github.com/inaciopjsi",
     helpLink: "https://github.com/inaciopjsi/twtest",
@@ -177,129 +177,195 @@ Object.assign(window.twSDK, {
 });
 
 // ═══════════════════════════════════════════════════════
-//  ESTADO GLOBAL
+//  ESTADO GLOBAL (único bloco — sem duplicatas)
 // ═══════════════════════════════════════════════════════
-let unitSpeeds = {}; // { spear: min/campo, sword: min/campo, ... }
-let myVillages = []; // vilas do jogador
-let smMapData = []; // resultado do buildSupportMap
-
-// ─── Agenda de ocupação: villageCoord → Date (livre a partir de)
-// Controla quando cada vila sua fica disponível novamente
-const availability = {};
+var SM = {
+  unitSpeeds: {}, // { spear: min/campo, sword: min/campo, ... }
+  myVillages: [],
+  mapData: [],
+};
 
 // ═══════════════════════════════════════════════════════
 //  VELOCIDADE DAS TROPAS
-//  twSDK.getWorldUnitInfo() retorna XML parseado em JSON.
-//  O campo speed está em minutos por campo (no mundo base 1×).
-//  Mundo com speed multiplier: dividimos pelo fator.
 // ═══════════════════════════════════════════════════════
-const DEFENSE_UNITS = ["spear", "sword", "heavy"]; // bloco de defesa típico
-const FALLBACK_SPEED = { spear: 18, sword: 22, heavy: 14, archer: 18 };
+var DEFENSE_UNITS = ["spear", "sword", "heavy"];
+var FALLBACK_SPEED = { spear: 18, sword: 22, heavy: 14, archer: 18 };
 
 async function loadUnitSpeeds() {
   try {
-    const unitInfo = await twSDK.getWorldUnitInfo();
-    // unitInfo é { units: { unit: [ {id, speed, ...}, ... ] } }
-    const units = unitInfo?.units?.unit || [];
-    units.forEach((u) => {
-      if (u.id && u.speed) unitSpeeds[u.id] = parseFloat(u.speed);
+    var unitInfo = await twSDK.getWorldUnitInfo();
+    var units =
+      unitInfo && unitInfo.units && unitInfo.units.unit
+        ? unitInfo.units.unit
+        : [];
+    units.forEach(function (u) {
+      if (u.id && u.speed) SM.unitSpeeds[u.id] = parseFloat(u.speed);
     });
   } catch (e) {
-    console.warn("[SupportMap] Fallback para velocidades padrão:", e);
+    console.warn("[SupportMap] Usando velocidades padrão:", e);
   }
-  // Complementa com fallback para unidades não encontradas
-  Object.assign(unitSpeeds, { ...FALLBACK_SPEED, ...unitSpeeds });
+  // Preenche fallback para unidades não retornadas
+  Object.keys(FALLBACK_SPEED).forEach(function (k) {
+    if (!SM.unitSpeeds[k]) SM.unitSpeeds[k] = FALLBACK_SPEED[k];
+  });
 }
 
-/** Retorna a velocidade (min/campo) da tropa mais lenta do bloco de defesa */
+/** min/campo da tropa mais LENTA do bloco de defesa */
 function defenseSpeed() {
-  return Math.max(
-    ...DEFENSE_UNITS.map((u) => unitSpeeds[u] || FALLBACK_SPEED[u] || 22),
+  return Math.max.apply(
+    null,
+    DEFENSE_UNITS.map(function (u) {
+      return SM.unitSpeeds[u] || FALLBACK_SPEED[u] || 22;
+    }),
   );
 }
 
-/**
- * Tempo de ida + volta para a distância dada, com a tropa mais lenta.
- * Retorna milissegundos.
- */
+/** Ida + volta em milissegundos */
 function roundTripMs(distCampos) {
-  const worldSpeed = parseFloat(game_data.speed) || 1;
-  const minPerCampo = defenseSpeed() / worldSpeed;
-  return distCampos * minPerCampo * 2 * 60 * 1000; // × 2 (ida+volta) × 60s × 1000ms
+  var worldSpeed = parseFloat(game_data.speed) || 1;
+  var minPerCampo = defenseSpeed() / worldSpeed;
+  return distCampos * minPerCampo * 2 * 60 * 1000;
 }
 
 // ═══════════════════════════════════════════════════════
 //  PARSER DA TELA DE INCOMINGS
+//
+//  Estrutura real da linha (confirmada pela screenshot):
+//  [checkbox] [ícone+tipo] [ALVO (sua vila)] [ATACANTE] [pts] [chegada] [restante] [N/A]
+//
+//  Na tabela #incomings_table a célula com link da SUA vila
+//  vem ANTES da célula do atacante. Porém o atacante pode
+//  não ter link (jogador sem vila visível) — identificamos
+//  pela coordenada: sua vila está em myVillageCoords.
 // ═══════════════════════════════════════════════════════
+
 function extractCoord(text) {
-  const m = text.match(/\((\d{1,3})\|(\d{1,3})\)/);
-  if (m) return `${m[1]}|${m[2]}`;
-  const m2 = text.match(/(\d{1,3})\|(\d{1,3})/);
-  return m2 ? `${m2[1]}|${m2[2]}` : null;
+  // Aceita (XXX|YYY) ou XXX|YYY
+  var m = text.match(/\((\d{1,3})\|(\d{1,3})\)/);
+  if (m) return m[1] + "|" + m[2];
+  var m2 = text.match(/(\d{1,3})\|(\d{1,3})/);
+  return m2 ? m2[1] + "|" + m2[2] : null;
 }
 
 function getServerNow() {
-  const t = jQuery("#serverTime").text().trim();
-  const d = jQuery("#serverDate").text().trim();
-  const [dd, mm, yyyy] = d.split("/");
-  return new Date(`${yyyy}-${mm}-${dd}T${t}`);
+  var t = jQuery("#serverTime").text().trim(); // HH:MM:SS
+  var d = jQuery("#serverDate").text().trim(); // DD/MM/YYYY
+  var parts = d.split("/");
+  return new Date(parts[2] + "-" + parts[1] + "-" + parts[0] + "T" + t);
 }
 
 function parseArrivalDate(text) {
   text = text.trim();
-  const now = getServerNow();
-  const y = now.getFullYear();
+  var now = getServerNow();
+  var y = now.getFullYear();
+  var isTomorrow = /amanh[aã]|tomorrow/i.test(text);
 
-  // "amanhã às HH:MM:SS" / "tomorrow at HH:MM:SS"
-  const mTomorrow = text.match(/amanh[aã]|tomorrow/i);
-  const mTime = text.match(/(\d{2}):(\d{2}):(\d{2})/);
-
-  // "em DD.MM. às HH:MM:SS" ou "DD.MM. às HH:MM:SS"
-  const mFull = text.match(
+  // "DD.MM. às HH:MM:SS" ou "em DD.MM. às HH:MM:SS"
+  var mFull = text.match(
     /(\d{1,2})\.(\d{1,2})\.\s+(?:às\s+)?(\d{2}):(\d{2}):(\d{2})/,
   );
   if (mFull) {
-    const [, dd, mm, hh, mi, ss] = mFull;
     return new Date(
-      `${y}-${mm.padStart(2, "0")}-${dd.padStart(2, "0")}T${hh}:${mi}:${ss}`,
+      y +
+        "-" +
+        mFull[2].padStart(2, "0") +
+        "-" +
+        mFull[1].padStart(2, "0") +
+        "T" +
+        mFull[3] +
+        ":" +
+        mFull[4] +
+        ":" +
+        mFull[5],
     );
   }
 
+  var mTime = text.match(/(\d{2}):(\d{2}):(\d{2})/);
   if (mTime) {
-    const [, hh, mi, ss] = mTime;
-    const base = new Date(now);
-    base.setHours(+hh, +mi, +ss, 0);
-    if (mTomorrow) base.setDate(base.getDate() + 1);
+    var base = new Date(now);
+    base.setHours(+mTime[1], +mTime[2], +mTime[3], 0);
+    if (isTomorrow) base.setDate(base.getDate() + 1);
     return base;
   }
   return null;
 }
 
-function parseIncomingsPage(doc) {
-  const rows = [];
+function parseIncomingsPage(doc, myCoordSet) {
+  var rows = [];
   jQuery("#incomings_table tbody tr", doc).each(function () {
-    const cells = jQuery("td", this);
+    var cells = jQuery("td", this);
     if (cells.length < 5) return;
 
-    // Ignora se não for ataque
-    const typeText = cells.eq(0).text();
-    if (!/ataque|attack/i.test(typeText)) return;
+    // Ignora não-ataques
+    if (!/ataque|attack/i.test(cells.eq(0).text())) return;
 
-    // Links de vila: [0] atacante, [1] alvo (sua vila)
-    const linkEls = jQuery('a[href*="village="]', this);
-    if (linkEls.length < 2) return;
+    // Coleta todos os links de vila
+    var linkEls = jQuery('a[href*="village="]', this);
+    if (linkEls.length < 1) return;
 
-    const attackerText = linkEls.eq(0).text().trim();
-    const targetText = linkEls.eq(1).text().trim();
-    const targetHref = linkEls.eq(1).attr("href") || "";
-    const vmatch = targetHref.match(/village=(\d+)/);
-    const targetVillageId = vmatch ? parseInt(vmatch[1]) : null;
+    var targetText = "",
+      targetCoord = null,
+      targetVillageId = null;
+    var attackerText = "",
+      attackerCoord = null;
+
+    // Identifica qual link é SUA vila (alvo) pela coordenada
+    linkEls.each(function () {
+      var txt = jQuery(this).text().trim();
+      var coord = extractCoord(txt);
+      var href = jQuery(this).attr("href") || "";
+      var vm = href.match(/village=(\d+)/);
+      var vid = vm ? parseInt(vm[1]) : null;
+
+      if (coord && myCoordSet.has(coord)) {
+        // É sua vila = alvo
+        targetText = txt;
+        targetCoord = coord;
+        targetVillageId = vid;
+      } else if (coord) {
+        // Coordenada existe mas não é sua = atacante
+        attackerText = txt;
+        attackerCoord = coord;
+      }
+    });
+
+    // Fallback: se não identificou pelo set, usa posição
+    // (1º link = alvo, 2º = atacante conforme layout TW-BR)
+    if (!targetCoord && linkEls.length >= 2) {
+      targetText = linkEls.eq(0).text().trim();
+      targetCoord = extractCoord(targetText);
+      var tHref = linkEls.eq(0).attr("href") || "";
+      var tVm = tHref.match(/village=(\d+)/);
+      targetVillageId = tVm ? parseInt(tVm[1]) : null;
+
+      attackerText = linkEls.eq(1).text().trim();
+      attackerCoord = extractCoord(attackerText);
+    } else if (!targetCoord && linkEls.length === 1) {
+      targetText = linkEls.eq(0).text().trim();
+      targetCoord = extractCoord(targetText);
+      var tHref2 = linkEls.eq(0).attr("href") || "";
+      var tVm2 = tHref2.match(/village=(\d+)/);
+      targetVillageId = tVm2 ? parseInt(tVm2[1]) : null;
+    }
+
+    // Atacante sem link: pega do texto da célula (sem link)
+    if (!attackerCoord) {
+      cells.each(function () {
+        if (attackerCoord) return;
+        var t = jQuery(this).text().trim();
+        var c = extractCoord(t);
+        if (c && c !== targetCoord) {
+          attackerCoord = c;
+          if (!attackerText) attackerText = t;
+        }
+      });
+    }
 
     // Extrai data de chegada
-    let arrivalDate = null;
+    var arrivalDate = null;
     cells.each(function () {
       if (arrivalDate) return;
-      const t = jQuery(this).text().trim();
+      var t = jQuery(this).text().trim();
       if (
         /\d{2}:\d{2}:\d{2}/.test(t) &&
         (/\d{1,2}\.\d{1,2}\./.test(t) ||
@@ -309,41 +375,40 @@ function parseIncomingsPage(doc) {
       }
     });
 
-    const targetCoord = extractCoord(targetText);
-    const attackerCoord = extractCoord(attackerText);
     if (!targetCoord || !arrivalDate) return;
 
     rows.push({
-      attackerText,
-      attackerCoord,
-      targetText,
-      targetCoord,
-      targetVillageId,
-      arrivalDate,
+      attackerText: attackerText,
+      attackerCoord: attackerCoord, // "XXX|YYY" ou null
+      targetText: targetText,
+      targetCoord: targetCoord,
+      targetVillageId: targetVillageId,
+      arrivalDate: arrivalDate,
     });
   });
   return rows;
 }
 
-async function fetchAllIncomings() {
-  const attacks = [parseIncomingsPage(document)].flat();
+async function fetchAllIncomings(myCoordSet) {
+  var attacks = parseIncomingsPage(document, myCoordSet);
 
-  // Detecta páginas extras via select de paginação
-  const extraUrls = [];
+  var extraUrls = [];
   jQuery("#incomings_table")
     .closest(".vis")
     .find("select option")
     .each(function () {
-      const v = jQuery(this).val();
+      var v = jQuery(this).val();
       if (v && !window.location.href.includes(v)) extraUrls.push(v);
     });
 
-  for (const url of extraUrls) {
-    await new Promise((r) => setTimeout(r, twSDK.delayBetweenRequests + 200));
+  for (var i = 0; i < extraUrls.length; i++) {
+    await new Promise(function (r) {
+      setTimeout(r, (twSDK.delayBetweenRequests || 200) + 200);
+    });
     try {
-      const html = await jQuery.get(url);
-      const doc = new DOMParser().parseFromString(html, "text/html");
-      attacks.push(...parseIncomingsPage(doc));
+      var html = await jQuery.get(extraUrls[i]);
+      var doc = new DOMParser().parseFromString(html, "text/html");
+      attacks = attacks.concat(parseIncomingsPage(doc, myCoordSet));
     } catch (e) {
       console.warn("[SupportMap] Erro paginação:", e);
     }
@@ -352,25 +417,25 @@ async function fetchAllIncomings() {
 }
 
 // ═══════════════════════════════════════════════════════
-//  VILAS DO JOGADOR (via map/village.txt)
+//  VILAS DO JOGADOR
 // ═══════════════════════════════════════════════════════
 async function fetchMyVillages() {
-  const villages = [];
+  var villages = [];
   try {
-    const txt = await jQuery.get("/map/village.txt");
-    const pid = parseInt(game_data.player.id);
+    var txt = await jQuery.get("/map/village.txt");
+    var pid = parseInt(game_data.player.id);
     txt
       .trim()
       .split("\n")
-      .forEach((line) => {
-        const p = line.split(",");
+      .forEach(function (line) {
+        var p = line.split(",");
         if (p.length >= 5 && parseInt(p[4]) === pid) {
           villages.push({
             id: parseInt(p[0]),
             name: decodeURIComponent(p[1].replace(/\+/g, " ")),
             x: parseInt(p[2]),
             y: parseInt(p[3]),
-            coord: `${p[2]}|${p[3]}`,
+            coord: p[2] + "|" + p[3],
           });
         }
       });
@@ -381,184 +446,189 @@ async function fetchMyVillages() {
       name: game_data.village.name,
       x: parseInt(game_data.village.x),
       y: parseInt(game_data.village.y),
-      coord: `${game_data.village.x}|${game_data.village.y}`,
+      coord: game_data.village.x + "|" + game_data.village.y,
     });
   }
   return villages;
 }
 
 // ═══════════════════════════════════════════════════════
-//  LÓGICA DO MAPA DE APOIO
-//
-//  Para cada ataque (ordenado por chegada):
-//  1. DEFENSORA  = vila minha mais próxima do alvo (≠ alvo)
-//                 que esteja disponível antes da chegada do ataque.
-//  2. APOIO      = vila minha mais próxima da defensora (≠ defensora, ≠ alvo)
-//                 que esteja disponível antes da chegada do ataque.
-//
-//  "Disponível" significa: freeAt[coord] <= arrivalDate
-//  Após atribuir, atualiza freeAt[coord] += roundTrip(dist)
-// ═══════════════════════════════════════════════════════
-const BUFFER_MARGIN_MS = 5 * 60 * 1000; // 5 min de margem de segurança
-
-// ═══════════════════════════════════════════════════════
 //  ANÁLISE DE AMEAÇA POR ATACANTE
 //
-//  Conta quantas aldeias DISTINTAS do jogador cada aldeia
-//  atacante está atacando. Quanto mais alvos, mais diluída
-//  a força — logo menor o perigo individual por alvo.
+//  Chave = attackerCoord (ex: "594|215").
+//  Se a coord não foi parseada, usa o village ID extraído
+//  do href, ou como último recurso o nome sem K-continente.
 //
-//  1 alvo  → PERIGO  🔴  (força concentrada)
-//  2 alvos → ATENÇÃO 🟡  (força dividida)
-//  3+      → SEGURO  🟢  (força muito diluída)
+//  1 alvo  → 🔴 PERIGO   (força concentrada)
+//  2 alvos → 🟡 ATENÇÃO  (força dividida)
+//  3+      → 🟢 SEGURO   (força muito diluída)
 // ═══════════════════════════════════════════════════════
+function attackerKey(atk) {
+  // Preferência: coordenada (mais estável)
+  if (atk.attackerCoord) return atk.attackerCoord;
+  // Fallback: nome sem continente (ex: "Rolo Compressor !!!")
+  return (
+    atk.attackerText.replace(/\s*\(\d+\|\d+\)\s*K\d+\s*$/, "").trim() ||
+    atk.attackerText
+  );
+}
 
-/**
- * Retorna mapa: attackerCoord → { count, targets: Set<targetCoord>, label, color, icon }
- */
-function buildAttackerThreatMap(attacks) {
-  const map = {};
-  attacks.forEach((atk) => {
-    const key = atk.attackerCoord || atk.attackerText;
+function buildThreatMap(attacks) {
+  var map = {};
+  attacks.forEach(function (atk) {
+    var key = attackerKey(atk);
     if (!map[key]) {
       map[key] = {
-        count: 0,
-        targets: new Set(),
+        targets: {},
         attackerText: atk.attackerText,
+        attackerCoord: atk.attackerCoord,
       };
     }
-    map[key].targets.add(atk.targetCoord);
+    map[key].targets[atk.targetCoord] = true; // Set via object
   });
 
-  Object.values(map).forEach((entry) => {
-    entry.count = entry.targets.size;
-    if (entry.count === 1) {
-      entry.level = "danger";
-      entry.icon = "🔴";
-      entry.label = "Perigo — ataque concentrado";
-      entry.color = "#c0392b";
-      entry.bg = "#fdecea";
-      entry.border = "#c0392b";
-    } else if (entry.count === 2) {
-      entry.level = "warning";
-      entry.icon = "🟡";
-      entry.label = "Atenção — força dividida";
-      entry.color = "#b7770d";
-      entry.bg = "#fffbe6";
-      entry.border = "#e0a800";
+  Object.keys(map).forEach(function (key) {
+    var count = Object.keys(map[key].targets).length;
+    map[key].count = count;
+    if (count === 1) {
+      map[key].level = "danger";
+      map[key].icon = "🔴";
+      map[key].desc = "Perigo — ataque concentrado";
+      map[key].color = "#922b21";
+      map[key].bg = "#fdecea";
+      map[key].border = "#c0392b";
+    } else if (count === 2) {
+      map[key].level = "warning";
+      map[key].icon = "🟡";
+      map[key].desc = "Atenção — força dividida";
+      map[key].color = "#7d6608";
+      map[key].bg = "#fefde7";
+      map[key].border = "#d4ac0d";
     } else {
-      entry.level = "safe";
-      entry.icon = "🟢";
-      entry.label = "Seguro — força muito diluída";
-      entry.color = "#1a7a3a";
-      entry.bg = "#eafaf1";
-      entry.border = "#27ae60";
+      map[key].level = "safe";
+      map[key].icon = "🟢";
+      map[key].desc = "Seguro — força diluída";
+      map[key].color = "#1e8449";
+      map[key].bg = "#eafaf1";
+      map[key].border = "#27ae60";
     }
   });
-
   return map;
 }
+
+// ═══════════════════════════════════════════════════════
+//  LÓGICA DE DISPONIBILIDADE E MAPA DE APOIO
+// ═══════════════════════════════════════════════════════
+var BUFFER_MS = 5 * 60 * 1000; // 5 min de margem
 
 function buildSupportMap(attacks, villages) {
   if (!attacks.length || !villages.length) return [];
 
-  // Pré-calcula ameaça por atacante
-  const threatMap = buildAttackerThreatMap(attacks);
+  var threatMap = buildThreatMap(attacks);
 
-  // Mapa coord → vila
-  const byCoord = {};
-  villages.forEach((v) => {
-    byCoord[v.coord] = v;
-  });
-
-  // Inicializa disponibilidade: todas livres desde agora
-  const freeAt = {};
-  villages.forEach((v) => {
+  // Disponibilidade: coord → Date (livre a partir de)
+  var freeAt = {};
+  villages.forEach(function (v) {
     freeAt[v.coord] = new Date(0);
   });
 
-  // Ordena ataques por chegada
-  const sorted = [...attacks].sort((a, b) => a.arrivalDate - b.arrivalDate);
+  // Ordena por chegada
+  var sorted = attacks.slice().sort(function (a, b) {
+    return a.arrivalDate - b.arrivalDate;
+  });
 
-  const result = [];
+  var result = [];
 
-  sorted.forEach((atk) => {
-    const arrival = atk.arrivalDate;
-    const needFreeBy = new Date(arrival.getTime() - BUFFER_MARGIN_MS);
-    const targetCoord = atk.targetCoord;
+  sorted.forEach(function (atk) {
+    var arrival = atk.arrivalDate;
+    var needFreeBy = new Date(arrival.getTime() - BUFFER_MS);
+    var tgt = atk.targetCoord;
 
-    // Candidatas ordenadas por distância ao alvo, excluindo o próprio alvo
-    const candidates = villages
-      .filter((v) => v.coord !== targetCoord)
-      .map((v) => ({
-        ...v,
-        dist: twSDK.calculateDistance(targetCoord, v.coord),
-      }))
-      .sort((a, b) => a.dist - b.dist);
+    // Candidatas à defensora: ordenadas por distância ao alvo, exceto o próprio alvo
+    var candidates = villages
+      .filter(function (v) {
+        return v.coord !== tgt;
+      })
+      .map(function (v) {
+        return Object.assign({}, v, {
+          dist: parseFloat(twSDK.calculateDistance(tgt, v.coord)),
+        });
+      })
+      .sort(function (a, b) {
+        return a.dist - b.dist;
+      });
 
     // 1. Defensora: mais próxima disponível a tempo
-    const defender =
-      candidates.find((v) => freeAt[v.coord] <= needFreeBy) || candidates[0];
-
-    // Atualiza disponibilidade da defensora (ida + volta ao alvo)
-    const defTrip = roundTripMs(defender.dist);
-    const defFreeAt = new Date(
-      arrival.getTime() + defTrip / 2 + BUFFER_MARGIN_MS,
-    );
-    // A defensora sai para defender e volta depois do ataque (estimativa: fica lá ~30min)
-    const defReturnAt = new Date(arrival.getTime() + defTrip / 2);
-    if (defReturnAt > (freeAt[defender.coord] || new Date(0))) {
-      freeAt[defender.coord] = defReturnAt;
-    }
-
-    // 2. Apoio à defensora: mais próxima da defensora, disponível a tempo
-    const supportCandidates = villages
-      .filter((v) => v.coord !== defender.coord && v.coord !== targetCoord)
-      .map((v) => ({
-        ...v,
-        dist: twSDK.calculateDistance(defender.coord, v.coord),
-      }))
-      .sort((a, b) => a.dist - b.dist);
-
-    const support =
-      supportCandidates.find((v) => freeAt[v.coord] <= needFreeBy) ||
-      supportCandidates[0] ||
-      null;
-
-    // Atualiza disponibilidade do apoio (ida + volta à defensora)
-    if (support) {
-      const supTrip = roundTripMs(support.dist);
-      const supReturn = new Date(arrival.getTime() + supTrip / 2);
-      if (supReturn > (freeAt[support.coord] || new Date(0))) {
-        freeAt[support.coord] = supReturn;
+    var defender = null;
+    for (var i = 0; i < candidates.length; i++) {
+      if (freeAt[candidates[i].coord] <= needFreeBy) {
+        defender = candidates[i];
+        break;
       }
     }
+    var defForced = !defender;
+    if (!defender) defender = candidates[0]; // forçado
 
-    // Avisa se a sugestão foi forçada (nenhuma disponível)
-    // Avisa se a sugestão foi forçada (nenhuma disponível)
-    const defBusy = freeAt[defender.coord] > needFreeBy && result.length > 0;
-    const suppBusy = support && freeAt[support.coord] > needFreeBy;
+    // Atualiza freeAt da defensora
+    var defReturn = new Date(
+      arrival.getTime() + roundTripMs(defender.dist) / 2,
+    );
+    if (defReturn > freeAt[defender.coord]) freeAt[defender.coord] = defReturn;
 
-    // Nível de ameaça do atacante
-    const threatKey = atk.attackerCoord || atk.attackerText;
-    const threat = threatMap[threatKey] || {
+    // 2. Apoio: mais próxima da defensora, disponível a tempo
+    var suppCandidates = villages
+      .filter(function (v) {
+        return v.coord !== defender.coord && v.coord !== tgt;
+      })
+      .map(function (v) {
+        return Object.assign({}, v, {
+          dist: parseFloat(twSDK.calculateDistance(defender.coord, v.coord)),
+        });
+      })
+      .sort(function (a, b) {
+        return a.dist - b.dist;
+      });
+
+    var support = null,
+      suppForced = false;
+    for (var j = 0; j < suppCandidates.length; j++) {
+      if (freeAt[suppCandidates[j].coord] <= needFreeBy) {
+        support = suppCandidates[j];
+        break;
+      }
+    }
+    if (!support && suppCandidates.length) {
+      support = suppCandidates[0];
+      suppForced = true;
+    }
+
+    if (support) {
+      var suppReturn = new Date(
+        arrival.getTime() + roundTripMs(support.dist) / 2,
+      );
+      if (suppReturn > freeAt[support.coord])
+        freeAt[support.coord] = suppReturn;
+    }
+
+    var threat = threatMap[attackerKey(atk)] || {
       icon: "🔴",
-      label: "?",
-      color: "#c0392b",
+      desc: "?",
+      color: "#922b21",
       bg: "#fdecea",
       border: "#c0392b",
       count: 1,
+      level: "danger",
     };
 
     result.push({
-      atk,
-      defender,
-      support,
-      defBusy,
-      suppBusy,
+      atk: atk,
+      defender: defender,
+      support: support,
+      defForced: defForced,
+      suppForced: suppForced,
       defFreeAt: freeAt[defender.coord],
       suppFreeAt: support ? freeAt[support.coord] : null,
-      threat,
+      threat: threat,
     });
   });
 
@@ -570,139 +640,258 @@ function buildSupportMap(attacks, villages) {
 // ═══════════════════════════════════════════════════════
 function fmtDate(d) {
   if (!d) return "?";
-  const zp = (n) => String(n).padStart(2, "0");
-  return `${zp(d.getDate())}/${zp(d.getMonth() + 1)} ${zp(d.getHours())}:${zp(d.getMinutes())}:${zp(d.getSeconds())}`;
+  var zp = function (n) {
+    return String(n).padStart(2, "0");
+  };
+  return (
+    zp(d.getDate()) +
+    "/" +
+    zp(d.getMonth() + 1) +
+    " " +
+    zp(d.getHours()) +
+    ":" +
+    zp(d.getMinutes()) +
+    ":" +
+    zp(d.getSeconds())
+  );
 }
 
 function renderTable(mapData) {
-  if (!mapData.length) return `<p>${twSDK.tt("No attacks")}</p>`;
+  if (!mapData.length) return "<p>" + twSDK.tt("No attacks") + "</p>";
 
-  const base = `https://${location.host}/game.php`;
+  var base = "https://" + location.host + "/game.php";
 
-  const rows = mapData
-    .map(
-      ({
-        atk,
-        defender,
-        support,
-        defBusy,
-        suppBusy,
-        defFreeAt,
-        suppFreeAt,
-        threat,
-      }) => {
-        const tgt = atk.targetCoord;
-        const tgtId = atk.targetVillageId;
-        const tgtUrl = `${base}?village=${tgtId}&screen=overview`;
-
-        // Link para a praça da defensora, pré-selecionando o alvo como destino
-        const placeUrl = `${base}?village=${defender.id}&screen=place&target=${tgtId}`;
-        const defUrl = `${base}?village=${defender.id}&screen=overview`;
-
-        const defDistStr = twSDK
-          .calculateDistance(tgt, defender.coord)
-          .toFixed(1);
-        const suppDistStr = support
-          ? twSDK.calculateDistance(defender.coord, support.coord).toFixed(1)
-          : "—";
-
-        const defBusyTag = defBusy
-          ? `<div class="sm-busy">${twSDK.tt("Busy")} ${fmtDate(defFreeAt)}</div>`
-          : "";
-        const suppBusyTag =
-          suppBusy && support
-            ? `<div class="sm-busy">${twSDK.tt("Busy")} ${fmtDate(suppFreeAt)}</div>`
-            : "";
-
-        const supportCell = support
-          ? `<a href="${base}?village=${support.id}&screen=overview" target="_blank">
-                   <strong>${support.name}</strong><br>
-                   <small>(${support.coord})</small>
-               </a>
-               <div class="sm-dist">📏 ${suppDistStr}</div>
-               ${suppBusyTag}`
-          : '<em style="color:#999">—</em>';
-
-        return `
-        <tr>
-            <td class="ra-tal">
-                <a href="${tgtUrl}" target="_blank">
-                    <strong>${atk.targetText.split(" K")[0]}</strong>
-                </a>
-                <div class="sm-time">🕐 ${fmtDate(atk.arrivalDate)}</div>
-                <div class="sm-threat" style="color:${threat.color}; background:${threat.bg}; border-left:3px solid ${threat.border}; padding:2px 6px; border-radius:3px; margin-top:3px; font-size:11px;">
-                    ${threat.icon} <strong>${atk.attackerText.split(" K")[0]}</strong>
-                    <span class="sm-threat-count">(${threat.count} alvo${threat.count > 1 ? "s" : ""} — ${threat.label.split(" — ")[1]})</span>
-                </div>
-            </td>
-            <td class="ra-tal">
-                <a href="${defUrl}" target="_blank">
-                    <strong>${defender.name}</strong><br>
-                    <small>(${defender.coord})</small>
-                </a>
-                <div class="sm-dist">📏 ${defDistStr}</div>
-                ${defBusyTag}
-                <div class="sm-actions">
-                    <a href="${placeUrl}" target="_blank" class="btn-confirm-yes sm-btn-place">
-                        ${twSDK.tt("SendSupport")}
-                    </a>
-                </div>
-            </td>
-            <td class="ra-tal">${supportCell}</td>
-        </tr>`;
-      },
-    )
-    .join("");
-
-  // Resumo de ameaças
-  const threatSummary = {};
-  mapData.forEach(({ threat }) => {
-    if (!threatSummary[threat.level])
-      threatSummary[threat.level] = { threat, count: 0 };
-    threatSummary[threat.level].count++;
+  // Legenda de ameaça
+  var legendTotals = { danger: 0, warning: 0, safe: 0 };
+  mapData.forEach(function (e) {
+    if (legendTotals[e.threat.level] !== undefined)
+      legendTotals[e.threat.level]++;
   });
-  const legendHtml = Object.values(threatSummary)
-    .map(
-      ({ threat, count }) =>
-        `<div class="sm-legend-item" style="background:${threat.bg}; border-color:${threat.border}; color:${threat.color};">
-            ${threat.icon} ${threat.label.split(" — ")[0]}: <strong>${count}</strong>
-         </div>`,
-    )
+  var legendHtml = [
+    {
+      level: "danger",
+      icon: "🔴",
+      label: "Perigo",
+      color: "#922b21",
+      bg: "#fdecea",
+      border: "#c0392b",
+    },
+    {
+      level: "warning",
+      icon: "🟡",
+      label: "Atenção",
+      color: "#7d6608",
+      bg: "#fefde7",
+      border: "#d4ac0d",
+    },
+    {
+      level: "safe",
+      icon: "🟢",
+      label: "Seguro",
+      color: "#1e8449",
+      bg: "#eafaf1",
+      border: "#27ae60",
+    },
+  ]
+    .filter(function (l) {
+      return legendTotals[l.level] > 0;
+    })
+    .map(function (l) {
+      return (
+        '<span class="sm-legend-item" style="background:' +
+        l.bg +
+        ";border-color:" +
+        l.border +
+        ";color:" +
+        l.color +
+        ';">' +
+        l.icon +
+        " " +
+        l.label +
+        ": <strong>" +
+        legendTotals[l.level] +
+        "</strong></span>"
+      );
+    })
     .join("");
 
-  return `
-        <div class="sm-legend">${legendHtml}</div>
-        <div class="ra-table-container">
-            <table class="ra-table ra-table-v2" width="100%" cellspacing="1" cellpadding="3">
-                <thead>
-                    <tr>
-                        <th class="ra-tal">${twSDK.tt("Target")}</th>
-                        <th class="ra-tal">${twSDK.tt("Defender")} + ação</th>
-                        <th class="ra-tal">${twSDK.tt("Support From")}</th>
-                    </tr>
-                </thead>
-                <tbody>${rows}</tbody>
-            </table>
-        </div>`;
+  var rows = mapData
+    .map(function (e) {
+      var atk = e.atk;
+      var defender = e.defender;
+      var support = e.support;
+      var threat = e.threat;
+
+      var tgtId = atk.targetVillageId;
+      var tgtUrl = base + "?village=" + tgtId + "&screen=overview";
+      var placeUrl =
+        base + "?village=" + defender.id + "&screen=place&target=" + tgtId;
+      var defUrl = base + "?village=" + defender.id + "&screen=overview";
+
+      var defDist = parseFloat(
+        twSDK.calculateDistance(atk.targetCoord, defender.coord),
+      ).toFixed(1);
+
+      // Nome limpo do atacante (sem coordenada e continente)
+      var atkName =
+        atk.attackerText.replace(/\s*\(\d+\|\d+\)\s*K\d+\s*$/, "").trim() ||
+        atk.attackerText;
+      var atkCoord = atk.attackerCoord ? " (" + atk.attackerCoord + ")" : "";
+
+      var busyTag = function (forced, freeAtDate) {
+        return forced
+          ? '<div class="sm-busy">⏳ ocupada até ' +
+              fmtDate(freeAtDate) +
+              "</div>"
+          : "";
+      };
+
+      var supportCell = support
+        ? '<a href="' +
+          base +
+          "?village=" +
+          support.id +
+          '&screen=overview" target="_blank">' +
+          "<strong>" +
+          support.name +
+          "</strong><br><small>(" +
+          support.coord +
+          ")</small></a>" +
+          '<div class="sm-dist">📏 ' +
+          parseFloat(
+            twSDK.calculateDistance(defender.coord, support.coord),
+          ).toFixed(1) +
+          " campos</div>" +
+          busyTag(e.suppForced, e.suppFreeAt)
+        : '<em style="color:#999">—</em>';
+
+      var tgtName = atk.targetText.replace(/\s*K\d+\s*$/, "").trim();
+
+      return (
+        "<tr>" +
+        '<td class="ra-tal">' +
+        '<a href="' +
+        tgtUrl +
+        '" target="_blank"><strong>' +
+        tgtName +
+        "</strong></a>" +
+        '<div class="sm-time">🕐 ' +
+        fmtDate(atk.arrivalDate) +
+        "</div>" +
+        '<div class="sm-threat" style="background:' +
+        threat.bg +
+        ";border-left:3px solid " +
+        threat.border +
+        ";color:" +
+        threat.color +
+        ';">' +
+        threat.icon +
+        " <strong>" +
+        atkName +
+        "</strong>" +
+        atkCoord +
+        '<span class="sm-threat-sub"> · ' +
+        threat.count +
+        " alvo" +
+        (threat.count > 1 ? "s" : "") +
+        " · " +
+        threat.desc.split(" — ")[1] +
+        "</span>" +
+        "</div>" +
+        "</td>" +
+        '<td class="ra-tal">' +
+        '<a href="' +
+        defUrl +
+        '" target="_blank"><strong>' +
+        defender.name +
+        "</strong><br><small>(" +
+        defender.coord +
+        ")</small></a>" +
+        '<div class="sm-dist">📏 ' +
+        defDist +
+        " campos</div>" +
+        busyTag(e.defForced, e.defFreeAt) +
+        '<div class="sm-actions"><a href="' +
+        placeUrl +
+        '" target="_blank" class="btn-confirm-yes sm-btn-place">' +
+        twSDK.tt("SendSupport") +
+        "</a></div>" +
+        "</td>" +
+        '<td class="ra-tal">' +
+        supportCell +
+        "</td>" +
+        "</tr>"
+      );
+    })
+    .join("");
+
+  return (
+    '<div class="sm-legend">' +
+    legendHtml +
+    "</div>" +
+    '<div class="ra-table-container">' +
+    '<table class="ra-table ra-table-v2" width="100%" cellspacing="1" cellpadding="3">' +
+    "<thead><tr>" +
+    '<th class="ra-tal">' +
+    twSDK.tt("Target") +
+    "</th>" +
+    '<th class="ra-tal">' +
+    twSDK.tt("Defender") +
+    "</th>" +
+    '<th class="ra-tal">' +
+    twSDK.tt("Support From") +
+    "</th>" +
+    "</tr></thead><tbody>" +
+    rows +
+    "</tbody></table></div>"
+  );
 }
 
 // ═══════════════════════════════════════════════════════
 //  TEXTO PARA COPIAR
 // ═══════════════════════════════════════════════════════
 function buildCopyText(mapData) {
-  const base = `https://${location.host}/game.php`;
-  const lines = ["=== Mapa de Apoio ===", ""];
-  mapData.forEach(({ atk, defender, support }) => {
-    const tUrl = `${base}?village=${atk.targetVillageId}&screen=overview`;
-    const dUrl = `${base}?village=${defender.id}&screen=overview`;
+  var base = "https://" + location.host + "/game.php";
+  var lines = ["=== Mapa de Apoio ===", ""];
+  mapData.forEach(function (e) {
+    var atk = e.atk;
+    var tUrl = base + "?village=" + atk.targetVillageId + "&screen=overview";
+    var dUrl = base + "?village=" + e.defender.id + "&screen=overview";
+    var tgtName = atk.targetText.replace(/\s*K\d+\s*$/, "").trim();
+    var atkName = atk.attackerText
+      .replace(/\s*\(\d+\|\d+\)\s*K\d+\s*$/, "")
+      .trim();
     lines.push(
-      `[${atk.targetText.split(" K")[0]} (${atk.targetCoord})](${tUrl}) ← ataque às ${fmtDate(atk.arrivalDate)}`,
+      e.threat.icon +
+        " [" +
+        tgtName +
+        "](" +
+        tUrl +
+        ") ← " +
+        atkName +
+        " · " +
+        fmtDate(atk.arrivalDate),
     );
-    lines.push(`  ↳ [${defender.name} (${defender.coord})](${dUrl}) DEFENDE`);
-    if (support) {
-      const sUrl = `${base}?village=${support.id}&screen=overview`;
+    lines.push(
+      "  ↳ [" +
+        e.defender.name +
+        " (" +
+        e.defender.coord +
+        ")](" +
+        dUrl +
+        ") DEFENDE",
+    );
+    if (e.support) {
+      var sUrl = base + "?village=" + e.support.id + "&screen=overview";
       lines.push(
-        `  ↳ [${support.name} (${support.coord})](${sUrl}) apoia ${defender.name}`,
+        "  ↳ [" +
+          e.support.name +
+          " (" +
+          e.support.coord +
+          ")](" +
+          sUrl +
+          ") apoia " +
+          e.defender.name,
       );
     }
     lines.push("");
@@ -714,34 +903,34 @@ function buildCopyText(mapData) {
 //  INTERFACE
 // ═══════════════════════════════════════════════════════
 function buildUI() {
-  const customStyle = `
-        .sm-controls { display:flex; gap:6px; margin-bottom:10px; }
-        .sm-controls .btn-confirm-yes { flex:1; text-align:center; padding:5px 0; font-weight:bold; }
-        .sm-status { font-size:12px; color:#7a5020; margin-bottom:8px; min-height:16px; }
-        .sm-time { font-size:11px; color:#305070; margin-top:3px; }
-        .sm-attacker { font-size:11px; color:#8a1010; margin-top:2px; }
-        .sm-dist { font-size:11px; color:#7a5020; margin-top:3px; }
-        .sm-busy { font-size:11px; color:#c05000; font-weight:bold; margin-top:3px;
-                   background:#fff3e0; border-left:3px solid #e06000; padding:2px 5px; border-radius:2px; }
-        .sm-actions { margin-top:5px; }
-        .sm-btn-place { font-size:11px !important; padding:3px 8px !important;
-                        display:inline-block; white-space:nowrap; }
-        .ra-table td { vertical-align:top !important; }
-        .sm-threat { line-height:1.4; }
-        .sm-threat-count { font-weight:normal; opacity:0.85; }
-        .sm-legend { display:flex; gap:10px; flex-wrap:wrap; margin-bottom:10px; font-size:11px; }
-        .sm-legend-item { display:flex; align-items:center; gap:4px; padding:3px 8px;
-                          border-radius:12px; font-weight:600; border:1px solid; }
-    `;
+  var customStyle = [
+    ".sm-controls{display:flex;gap:6px;margin-bottom:10px;}",
+    ".sm-controls .btn-confirm-yes{flex:1;text-align:center;padding:5px 0;font-weight:bold;}",
+    ".sm-status{font-size:12px;color:#7a5020;margin-bottom:8px;min-height:16px;}",
+    ".sm-time{font-size:11px;color:#305070;margin-top:3px;}",
+    ".sm-dist{font-size:11px;color:#7a5020;margin-top:3px;}",
+    ".sm-threat{font-size:11px;padding:3px 6px;border-radius:3px;margin-top:4px;line-height:1.5;}",
+    ".sm-threat-sub{font-weight:normal;opacity:0.85;}",
+    ".sm-busy{font-size:11px;color:#c05000;font-weight:bold;margin-top:3px;background:#fff3e0;border-left:3px solid #e06000;padding:2px 5px;border-radius:2px;}",
+    ".sm-actions{margin-top:5px;}",
+    ".sm-btn-place{font-size:11px!important;padding:3px 8px!important;display:inline-block;white-space:nowrap;}",
+    ".sm-legend{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px;}",
+    ".sm-legend-item{font-size:12px;padding:3px 10px;border-radius:12px;border:1px solid;font-weight:600;}",
+    ".ra-table td{vertical-align:top!important;}",
+  ].join("\n");
 
-  const body = `
-        <div class="sm-controls">
-            <a href="#" class="btn-confirm-yes" id="sm-btn-gen">${twSDK.tt("Generate")}</a>
-            <a href="#" class="btn-confirm-yes" id="sm-btn-copy" style="display:none;">${twSDK.tt("Copy All")}</a>
-        </div>
-        <div class="sm-status" id="sm-status"></div>
-        <div id="sm-result"></div>
-    `;
+  var body = [
+    '<div class="sm-controls">',
+    '<a href="#" class="btn-confirm-yes" id="sm-btn-gen">' +
+      twSDK.tt("Generate") +
+      "</a>",
+    '<a href="#" class="btn-confirm-yes" id="sm-btn-copy" style="display:none;">' +
+      twSDK.tt("Copy All") +
+      "</a>",
+    "</div>",
+    '<div class="sm-status" id="sm-status"></div>',
+    '<div id="sm-result"></div>',
+  ].join("");
 
   twSDK.renderBoxWidget(body, "supportMap", "sm", customStyle);
 
@@ -752,23 +941,31 @@ function buildUI() {
     jQuery("#sm-status").text(twSDK.tt("Loading"));
 
     try {
-      const [attacks, villages] = await Promise.all([
-        fetchAllIncomings(),
-        fetchMyVillages(),
-      ]);
-      myVillages = villages;
+      SM.myVillages = await fetchMyVillages();
+      var myCoordSet = new Set(
+        SM.myVillages.map(function (v) {
+          return v.coord;
+        }),
+      );
+
+      var attacks = await fetchAllIncomings(myCoordSet);
 
       if (!attacks.length) {
-        jQuery("#sm-result").html(`<p>${twSDK.tt("No attacks")}</p>`);
+        jQuery("#sm-result").html("<p>" + twSDK.tt("No attacks") + "</p>");
         jQuery("#sm-status").text("");
         return;
       }
 
-      smMapData = buildSupportMap(attacks, villages);
-      jQuery("#sm-result").html(renderTable(smMapData));
+      SM.mapData = buildSupportMap(attacks, SM.myVillages);
+      jQuery("#sm-result").html(renderTable(SM.mapData));
       jQuery("#sm-btn-copy").show();
       jQuery("#sm-status").text(
-        `${twSDK.tt("Done")} ${attacks.length} ataque(s) · ${villages.length} vila(s) suas.`,
+        twSDK.tt("Done") +
+          " " +
+          attacks.length +
+          " ataque(s) · " +
+          SM.myVillages.length +
+          " vilas suas.",
       );
     } catch (err) {
       jQuery("#sm-status").text("Erro: " + err.message);
@@ -778,10 +975,12 @@ function buildUI() {
 
   jQuery("#sm-btn-copy").on("click", function (e) {
     e.preventDefault();
-    if (!smMapData.length) return;
-    navigator.clipboard.writeText(buildCopyText(smMapData)).then(() => {
+    if (!SM.mapData.length) return;
+    navigator.clipboard.writeText(buildCopyText(SM.mapData)).then(function () {
       jQuery("#sm-status").text(twSDK.tt("Copied"));
-      setTimeout(() => jQuery("#sm-status").text(""), 2000);
+      setTimeout(function () {
+        jQuery("#sm-status").text("");
+      }, 2000);
     });
   });
 }
@@ -790,21 +989,21 @@ function buildUI() {
 //  ENTRY POINT
 // ═══════════════════════════════════════════════════════
 (async function () {
-  // Carrega o twSDK caso não esteja presente
   if (typeof twSDK === "undefined") {
-    await new Promise((resolve, reject) => {
-      const s = document.createElement("script");
+    await new Promise(function (resolve, reject) {
+      var s = document.createElement("script");
       s.src =
         "https://cdn.jsdelivr.net/gh/RedAlertTW/Tribal-Wars-Scripts-SDK@main/twSDK.js";
       s.onload = resolve;
-      s.onerror = () => reject(new Error("Falha ao carregar twSDK"));
+      s.onerror = function () {
+        reject(new Error("Falha ao carregar twSDK"));
+      };
       document.head.appendChild(s);
     });
   }
 
   await twSDK.init(scriptConfig);
 
-  // Valida tela
   if (
     twSDK.getParameterByName("screen") !== "overview_villages" ||
     twSDK.getParameterByName("mode") !== "incomings"
@@ -815,7 +1014,6 @@ function buildUI() {
     return;
   }
 
-  // Carrega velocidades das unidades em paralelo com a UI
   await loadUnitSpeeds();
   buildUI();
 })();
